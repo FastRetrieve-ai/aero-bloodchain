@@ -20,7 +20,8 @@ VECTOR_DB_DIR.mkdir(exist_ok=True)
 
 # OpenAI Configuration
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4-turbo-preview")  # Will use GPT-5 when available
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5")  # Will use GPT-5 when available
+SQL_QA_MODEL = os.getenv("SQL_QA_MODEL") or OPENAI_MODEL
 
 # Database Configuration
 DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{DB_DIR}/bloodchain.db")
@@ -40,4 +41,3 @@ EMBEDDING_MODEL = "text-embedding-3-large"
 
 # Manual file path
 EMERGENCY_MANUAL_PATH = DATA_DIR / "emergency-patient-rescue-process.md"
-

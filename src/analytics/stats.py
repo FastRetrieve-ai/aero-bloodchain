@@ -59,6 +59,11 @@ def infer_chart_type(question: str, data: pd.DataFrame) -> Optional[str]:
     if any(word in question_lower for word in ['比較', '對比', '排名', 'compare', 'rank']):
         return 'bar'
     
+    if any(word in question_lower for word in ['箱型', '箱形', '箱線圖', 'box plot', '箱型圖']):
+        if len(data.columns) >= 2:
+            return 'box'
+        return 'histogram'
+    
     if any(word in question_lower for word in ['分布', '比例', '佔比', 'distribution', 'proportion', 'percentage']):
         if len(data) <= 10:
             return 'pie'
@@ -124,6 +129,12 @@ def create_chart_from_data(
         elif chart_type == 'histogram':
             fig = px.histogram(data, x=x_col, title=title)
         
+        elif chart_type == 'box':
+            if y_col:
+                fig = px.box(data, x=x_col, y=y_col, title=title, points="outliers")
+            else:
+                fig = px.box(data, y=x_col, title=title, points="outliers")
+        
         else:
             fig = px.bar(data, x=x_col, y=y_col, title=title)
         
@@ -135,4 +146,3 @@ def create_chart_from_data(
         fig = go.Figure()
         fig.update_layout(title=f"建立圖表時發生錯誤: {str(e)}")
         return fig
-

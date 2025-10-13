@@ -10,7 +10,7 @@ import json
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
 
-from ..config import VECTOR_DB_DIR, CHUNK_SIZE, CHUNK_OVERLAP, EMBEDDING_MODEL, OPENAI_API_KEY
+from config import VECTOR_DB_DIR, CHUNK_SIZE, CHUNK_OVERLAP, EMBEDDING_MODEL, OPENAI_API_KEY
 
 
 class VectorStoreManager:
@@ -173,4 +173,3 @@ class VectorStoreManager:
         count = cursor.fetchone()[0]
         conn.close()
         return count
-

@@ -1,16 +1,17 @@
 """
 Q&A Bot for emergency manual using RAG with LangChain and GPT-4
 """
-from typing import List, Dict, Any
+from typing import Dict, Any
 from pathlib import Path
+import json
+import hashlib
+from datetime import datetime
 
 from langchain_openai import ChatOpenAI
-from langchain.chains import ConversationalRetrievalChain
-from langchain.memory import ConversationBufferMemory
 from langchain.prompts import PromptTemplate
 
 from .embeddings import VectorStoreManager
-from ..config import OPENAI_API_KEY, OPENAI_MODEL, EMERGENCY_MANUAL_PATH
+from config import OPENAI_API_KEY, OPENAI_MODEL, EMERGENCY_MANUAL_PATH
 
 
 class ManualQABot:
@@ -21,7 +22,7 @@ class ManualQABot:
         self.vector_store = VectorStoreManager()
         self.llm = ChatOpenAI(
             model=OPENAI_MODEL,
-            temperature=0.1,
+            # temperature=0.1, # GPT-5 does not allow temperature configuration due to thinking models behavior
             openai_api_key=OPENAI_API_KEY
         )
         self.chat_history = []
@@ -50,26 +51,54 @@ class ManualQABot:
 回答：""",
             input_variables=["context", "chat_history", "question"]
         )
-    
+
     def load_manual(self, manual_path: Path = EMERGENCY_MANUAL_PATH):
         """Load and index the emergency manual"""
         if not manual_path.exists():
             raise FileNotFoundError(f"Manual file not found: {manual_path}")
-        
+
         print(f"Loading manual from: {manual_path}")
-        
+
         # Read manual content
         with open(manual_path, 'r', encoding='utf-8') as f:
             content = f.read()
-        
-        # Clear existing documents
+
+        # Determine whether we need to rebuild embeddings
+        manual_hash = hashlib.sha256(content.encode('utf-8')).hexdigest()
+        meta_path = self.vector_store.db_path.with_suffix(".meta.json")
+        existing_chunks = self.vector_store.get_document_count()
+
+        if existing_chunks > 0 and meta_path.exists():
+            try:
+                with meta_path.open("r", encoding="utf-8") as meta_file:
+                    meta = json.load(meta_file)
+                if meta.get("manual_hash") == manual_hash:
+                    print(
+                        f"Manual already indexed with {existing_chunks} chunks. "
+                        "Skipping re-embedding."
+                    )
+                    return
+            except json.JSONDecodeError:
+                # Proceed with rebuild if metadata file is corrupt
+                pass
+
+        # Clear existing documents before rebuilding
         self.vector_store.clear_store()
-        
+
         # Add to vector store
         self.vector_store.add_documents(content)
-        
+
         chunk_count = self.vector_store.get_document_count()
         print(f"Manual loaded successfully. Total chunks: {chunk_count}")
+
+        # Persist metadata for future runs
+        meta_payload = {
+            "manual_path": str(manual_path.resolve()),
+            "manual_hash": manual_hash,
+            "indexed_at": datetime.utcnow().isoformat()
+        }
+        with meta_path.open("w", encoding="utf-8") as meta_file:
+            json.dump(meta_payload, meta_file, ensure_ascii=False, indent=2)
     
     def ask(self, question: str) -> Dict[str, Any]:
         """
@@ -134,4 +163,3 @@ class ManualQABot:
         
         content = relevant_docs[0][0]
         return content
-

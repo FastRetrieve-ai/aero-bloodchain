@@ -5,6 +5,7 @@ Main Streamlit application for Blood Chain System
 import streamlit as st
 from pathlib import Path
 import sys
+from datetime import datetime
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -66,14 +67,37 @@ def page_manual_qa():
     # Chat interface
     if 'chat_history' not in st.session_state:
         st.session_state.chat_history = []
-    
-    # Display chat history
-    for i, (question, answer) in enumerate(st.session_state.chat_history):
-        with st.container():
-            st.markdown(f"**👤 問題：** {question}")
-            st.markdown(f"**🤖 回答：** {answer}")
-            st.divider()
-    
+
+    # Display chat history using Streamlit chat layout
+    for entry in st.session_state.chat_history:
+        if isinstance(entry, dict):
+            question = entry.get("question", "")
+            answer = entry.get("answer", "")
+            sources = entry.get("sources", [])
+        else:
+            # Backward compatibility for tuple-based history
+            question, answer = entry
+            sources = []
+
+        with st.chat_message("user"):
+            st.markdown(question)
+
+        with st.chat_message("assistant"):
+            st.markdown(answer)
+            if sources:
+                st.caption("參考章節")
+                for source in sources:
+                    section = source.get("section") or "未知章節"
+                    similarity = source.get("similarity")
+                    excerpt = source.get("content", "")
+                    if similarity is not None:
+                        st.markdown(f"- **{section}** · 相似度 {similarity:.2f}")
+                    else:
+                        st.markdown(f"- **{section}**")
+                    if excerpt:
+                        with st.expander(f"查看 {section} 節錄"):
+                            st.write(excerpt)
+
     # Input form
     with st.form(key='qa_form'):
         question = st.text_input(
@@ -81,16 +105,20 @@ def page_manual_qa():
             placeholder="例如：G1 通用流程包含哪些內容？"
         )
         submit = st.form_submit_button("🔍 詢問")
-        
+
         if submit and question:
             with st.spinner("思考中..."):
                 try:
                     result = st.session_state.qa_bot.ask(question)
-                    st.session_state.chat_history.append((question, result['answer']))
+                    st.session_state.chat_history.append({
+                        "question": question,
+                        "answer": result['answer'],
+                        "sources": result.get('sources', [])
+                    })
                     st.rerun()
                 except Exception as e:
                     st.error(f"處理問題時發生錯誤：{e}")
-    
+
     # Clear history button
     if st.session_state.chat_history and st.button("🗑️ 清除對話歷史"):
         st.session_state.chat_history = []
@@ -109,30 +137,42 @@ def page_maps():
     # Sidebar filters
     st.sidebar.subheader("地圖篩選條件")
     
-    # Get distinct districts
     try:
-        districts = db_manager.get_distinct_values('incident_district')
-        selected_district = st.sidebar.selectbox("行政區", ["全部"] + districts)
-    except:
-        selected_district = "全部"
+        districts = sorted([d for d in db_manager.get_distinct_values('incident_district') if d])
+    except Exception:
+        districts = []
+    selected_district = st.sidebar.selectbox("行政區", ["全部"] + districts)
     
-    # Date range filter
+    try:
+        dispatch_options = sorted([d for d in db_manager.get_distinct_values('dispatch_reason') if d])
+    except Exception:
+        dispatch_options = []
+    selected_dispatch = st.sidebar.multiselect("派遣原因", dispatch_options)
+    
+    try:
+        triage_options = sorted([t for t in db_manager.get_distinct_values('triage_level') if t])
+    except Exception:
+        triage_options = []
+    selected_triage = st.sidebar.multiselect("檢傷分級", triage_options)
+    
     date_range = st.sidebar.date_input("日期範圍", [])
-    
-    # Critical cases only
     critical_only = st.sidebar.checkbox("僅顯示危急個案")
     
-    # Prepare filters
     filters = {}
     if selected_district != "全部":
         filters['district'] = selected_district
     if len(date_range) == 2:
-        filters['start_date'] = date_range[0]
-        filters['end_date'] = date_range[1]
+        start_date = datetime.combine(date_range[0], datetime.min.time())
+        end_date = datetime.combine(date_range[1], datetime.max.time())
+        filters['start_date'] = start_date
+        filters['end_date'] = end_date
+    if selected_dispatch:
+        filters['dispatch_reasons'] = selected_dispatch
+    if selected_triage:
+        filters['triage_levels'] = selected_triage
     if critical_only:
         filters['critical_only'] = True
     
-    # Get data
     try:
         df = db_manager.get_cases_dataframe(filters)
         
@@ -140,43 +180,64 @@ def page_maps():
             st.warning("沒有符合條件的資料")
             return
         
-        st.info(f"共 {len(df)} 筆案件")
+        st.info(f"符合條件的案件共 {len(df)} 筆")
         
-        # Row 1: Heatmap with markers
-        st.subheader("📍 案件熱力圖與標記")
-        with st.spinner("生成熱力圖..."):
-            heatmap = create_heatmap(df, filters)
-            st_folium(heatmap, width=1200, height=500)
+        critical_cases = 0
+        if 'critical_case' in df.columns:
+            critical_cases = int(df['critical_case'].fillna(False).astype(int).sum())
         
-        st.divider()
+        avg_response_minutes = None
+        if 'response_time_seconds' in df.columns:
+            response_series = df['response_time_seconds'].dropna()
+            if not response_series.empty:
+                avg_response_minutes = response_series.mean() / 60
         
-        # Row 2: Time animation
-        st.subheader("⏱️ 時間序列動畫")
-        with st.spinner("生成時間動畫..."):
-            animation_fig = create_time_animation_map(df)
-            st.plotly_chart(animation_fig, use_container_width=True)
+        covered_districts = df['incident_district'].nunique() if 'incident_district' in df.columns else 0
+        period_start = df['date'].min() if 'date' in df.columns else None
+        period_end = df['date'].max() if 'date' in df.columns else None
         
-        st.divider()
+        metric_cols = st.columns(4)
+        metric_cols[0].metric("案件數", f"{len(df):,}")
+        metric_cols[1].metric("危急案件", f"{critical_cases:,}")
+        if avg_response_minutes is not None:
+            metric_cols[2].metric("平均反應時間 (分)", f"{avg_response_minutes:.1f}")
+        else:
+            metric_cols[2].metric("平均反應時間 (分)", "—")
+        metric_cols[3].metric("涵蓋行政區", f"{covered_districts}")
         
-        # Statistics charts
-        st.subheader("📊 統計圖表")
-        with st.spinner("生成統計圖表..."):
-            charts = create_statistics_charts(df)
-            
-            # Display charts in columns
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                if 'district_bar' in charts:
-                    st.plotly_chart(charts['district_bar'], use_container_width=True)
-                if 'time_line' in charts:
-                    st.plotly_chart(charts['time_line'], use_container_width=True)
-            
-            with col2:
-                if 'triage_pie' in charts:
-                    st.plotly_chart(charts['triage_pie'], use_container_width=True)
-                if 'response_histogram' in charts:
-                    st.plotly_chart(charts['response_histogram'], use_container_width=True)
+        if period_start is not None and period_end is not None:
+            st.caption(f"資料期間：{period_start:%Y-%m-%d} ～ {period_end:%Y-%m-%d}")
+        
+        tab_heatmap, tab_animation, tab_stats = st.tabs(["📍 熱力圖與標記", "⏱️ 時間序列動畫", "📊 統計圖表"])
+        
+        with tab_heatmap:
+            st.markdown("透過熱力圖快速掌握案件密度，並利用標記瀏覽案件細節。")
+            with st.spinner("生成熱力圖..."):
+                heatmap = create_heatmap(df, filters)
+                st_folium(heatmap, width=None, height=520, returned_objects=[])
+        
+        with tab_animation:
+            st.markdown("時間序列動畫呈現案件發生的累積趨勢與時空分布。")
+            with st.spinner("生成時間動畫..."):
+                animation_fig = create_time_animation_map(df)
+                st.plotly_chart(animation_fig, use_container_width=True)
+        
+        with tab_stats:
+            st.markdown("多維統計視角幫助追蹤行政區、時段與檢傷等核心指標。")
+            with st.spinner("生成統計圖表..."):
+                charts = create_statistics_charts(df)
+                
+                chart_order = ["district_bar", "time_line", "triage_pie", "response_histogram", "reason_bar", "critical_trend", "hospital_bar"]
+                available_charts = [key for key in chart_order if key in charts]
+                
+                if not available_charts:
+                    st.info("目前沒有可顯示的統計圖表。")
+                else:
+                    for i in range(0, len(available_charts), 2):
+                        cols = st.columns(2)
+                        for col, key in zip(cols, available_charts[i:i+2]):
+                            with col:
+                                st.plotly_chart(charts[key], use_container_width=True)
     
     except Exception as e:
         st.error(f"載入地圖時發生錯誤：{e}")
@@ -387,4 +448,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

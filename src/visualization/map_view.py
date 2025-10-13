@@ -3,15 +3,12 @@ Interactive map visualizations for emergency cases
 """
 import pandas as pd
 import folium
-from folium.plugins import HeatMap, MarkerCluster
+from folium.plugins import HeatMap, MarkerCluster, MiniMap, Fullscreen
 import plotly.express as px
 import plotly.graph_objects as go
-from typing import List, Dict, Any
-from geopy.geocoders import Nominatim
-from geopy.exc import GeocoderTimedOut
-import time
+from typing import Dict, Any
 
-from ..config import DEFAULT_MAP_CENTER, DEFAULT_MAP_ZOOM
+from config import DEFAULT_MAP_CENTER, DEFAULT_MAP_ZOOM
 
 
 # District coordinates for New Taipei City
@@ -84,21 +81,46 @@ def create_heatmap(df: pd.DataFrame, filters: Dict[str, Any] = None) -> folium.M
     """
     # Apply filters if provided
     if filters:
-        if 'start_date' in filters:
-            df = df[df['date'] >= filters['start_date']]
-        if 'end_date' in filters:
-            df = df[df['date'] <= filters['end_date']]
-        if 'district' in filters and filters['district']:
+        if 'start_date' in filters and 'date' in df.columns:
+            df = df[df['date'] >= pd.to_datetime(filters['start_date'])]
+        if 'end_date' in filters and 'date' in df.columns:
+            df = df[df['date'] <= pd.to_datetime(filters['end_date'])]
+        if 'district' in filters and filters['district'] and 'incident_district' in df.columns:
             df = df[df['incident_district'] == filters['district']]
-        if 'critical_only' in filters and filters['critical_only']:
+        if 'dispatch_reasons' in filters and filters['dispatch_reasons'] and 'dispatch_reason' in df.columns:
+            df = df[df['dispatch_reason'].isin(filters['dispatch_reasons'])]
+        if 'triage_levels' in filters and filters['triage_levels'] and 'triage_level' in df.columns:
+            df = df[df['triage_level'].isin(filters['triage_levels'])]
+        if 'critical_only' in filters and filters['critical_only'] and 'critical_case' in df.columns:
             df = df[df['critical_case'] == True]
     
     # Create base map
     m = folium.Map(
         location=DEFAULT_MAP_CENTER,
         zoom_start=DEFAULT_MAP_ZOOM,
-        tiles='OpenStreetMap'
+        tiles=None,
+        control_scale=True
     )
+
+    # Additional base layers for aesthetics
+    folium.TileLayer(
+        tiles='https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
+        attr='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, &copy; <a href="https://carto.com/attributions">CARTO</a>',
+        name='CartoDB Positron',
+        control=True
+    ).add_to(m)
+    folium.TileLayer(
+        tiles='OpenStreetMap',
+        name='OpenStreetMap',
+        attr='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+    ).add_to(m)
+    folium.TileLayer(
+        tiles='https://stamen-tiles-{s}.a.ssl.fastly.net/toner/{z}/{x}/{y}.png',
+        name='Stamen Toner',
+        attr='Map tiles by <a href="http://stamen.com">Stamen Design</a>, under <a href="http://creativecommons.org/licenses/by/3.0">CC BY 3.0</a>. Data by <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>, under ODbL.'
+    ).add_to(m)
+    MiniMap(toggle_display=True).add_to(m)
+    Fullscreen(position='topleft').add_to(m)
     
     # Prepare location data
     locations = []
@@ -134,24 +156,24 @@ def create_heatmap(df: pd.DataFrame, filters: Dict[str, Any] = None) -> folium.M
     if locations:
         HeatMap(
             locations,
-            radius=15,
-            blur=25,
+            radius=18,
+            blur=28,
             max_zoom=13,
-            gradient={0.4: 'blue', 0.6: 'yellow', 0.8: 'orange', 1.0: 'red'}
+            gradient={0.4: '#74add1', 0.6: '#fdae61', 0.8: '#f46d43', 1.0: '#d73027'}
         ).add_to(m)
-        
+
         # Add marker cluster
-        marker_cluster = MarkerCluster().add_to(m)
-        
+        marker_cluster = MarkerCluster(name="案件標記").add_to(m)
+
         for data in marker_data:
             # Set icon color based on criticality
             icon_color = 'red' if data['critical'] else 'blue'
-            
+
             # Create popup content
             popup_html = f"""
-            <div style="width: 250px;">
-                <h4>案件 {data['case_number']}</h4>
-                <table style="width:100%">
+            <div style="width: 260px;">
+                <h4 style="margin-bottom:6px;">案件 {data['case_number']}</h4>
+                <table style="width:100%;font-size:13px;">
                     <tr><td><b>日期：</b></td><td>{data['date']}</td></tr>
                     <tr><td><b>派遣原因：</b></td><td>{data['dispatch_reason']}</td></tr>
                     <tr><td><b>行政區：</b></td><td>{data['district']}</td></tr>
@@ -161,13 +183,14 @@ def create_heatmap(df: pd.DataFrame, filters: Dict[str, Any] = None) -> folium.M
                 </table>
             </div>
             """
-            
+
             folium.Marker(
                 location=data['coords'],
-                popup=folium.Popup(popup_html, max_width=300),
+                popup=folium.Popup(popup_html, max_width=320),
                 icon=folium.Icon(color=icon_color, icon='ambulance', prefix='fa')
             ).add_to(marker_cluster)
-    
+
+    folium.LayerControl(collapsed=False).add_to(m)
     return m
 
 
@@ -239,11 +262,11 @@ def create_time_animation_map(df: pd.DataFrame) -> go.Figure:
             'date_str': False
         },
         color='critical',
-        color_discrete_map={True: 'red', False: 'blue'},
+        color_discrete_map={True: '#d73027', False: '#4575b4'},
         labels={'critical': '危急個案'},
         zoom=10,
         center={'lat': DEFAULT_MAP_CENTER[0], 'lon': DEFAULT_MAP_CENTER[1]},
-        mapbox_style='open-street-map',
+        mapbox_style='carto-positron',
         height=600,
         title='急救案件時間序列動畫'
     )
@@ -262,8 +285,10 @@ def create_time_animation_map(df: pd.DataFrame) -> go.Figure:
     )
     
     # Update animation speed
-    fig.layout.updatemenus[0].buttons[0].args[1]["frame"]["duration"] = 500
-    fig.layout.updatemenus[0].buttons[0].args[1]["transition"]["duration"] = 300
+    if fig.layout.updatemenus and fig.layout.updatemenus[0].buttons:
+        button_args = fig.layout.updatemenus[0].buttons[0].args
+        if len(button_args) > 1 and "frame" in button_args[1] and "transition" in button_args[1]:
+            button_args[1]["frame"]["duration"] = 500
+            button_args[1]["transition"]["duration"] = 300
     
     return fig
-

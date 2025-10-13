@@ -8,7 +8,7 @@ from datetime import datetime
 import pandas as pd
 
 from .models import Base, EmergencyCase
-from ..config import DATABASE_URL
+from config import DATABASE_URL
 
 
 class DatabaseManager:
@@ -104,13 +104,21 @@ class DatabaseManager:
                             EmergencyCase.date <= filters['end_date']
                         )
                     )
-                if 'district' in filters:
+                if 'district' in filters and filters['district']:
                     query = query.filter(
                         EmergencyCase.incident_district == filters['district']
                     )
-                if 'dispatch_reason' in filters:
+                if 'dispatch_reasons' in filters and filters['dispatch_reasons']:
                     query = query.filter(
-                        EmergencyCase.dispatch_reason.like(f"%{filters['dispatch_reason']}%")
+                        EmergencyCase.dispatch_reason.in_(filters['dispatch_reasons'])
+                    )
+                elif 'dispatch_reason' in filters and filters['dispatch_reason']:
+                    query = query.filter(
+                        EmergencyCase.dispatch_reason.ilike(f"%{filters['dispatch_reason']}%")
+                    )
+                if 'triage_levels' in filters and filters['triage_levels']:
+                    query = query.filter(
+                        EmergencyCase.triage_level.in_(filters['triage_levels'])
                     )
                 if 'critical_only' in filters and filters['critical_only']:
                     query = query.filter(EmergencyCase.critical_case == True)
@@ -172,4 +180,3 @@ class DatabaseManager:
             return [v[0] for v in values if v[0] is not None]
         finally:
             session.close()
-

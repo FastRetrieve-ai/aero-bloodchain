@@ -7,12 +7,15 @@ import pandas as pd
 from datetime import datetime
 from typing import Dict, Any
 
-# Add parent directory to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Add project src directory to path for absolute imports
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+SRC_DIR = PROJECT_ROOT / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
 
-from src.database.db_manager import DatabaseManager
-from src.database.models import EmergencyCase
-from src.config import DATA_DIR
+from database.db_manager import DatabaseManager
+from database.models import EmergencyCase
+from config import DATA_DIR
 
 
 def parse_datetime(date_str: Any) -> datetime:
@@ -381,4 +384,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
