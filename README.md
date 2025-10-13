@@ -62,11 +62,14 @@ poetry install
 cp .env.example .env
 ```
 
-編輯 `.env` 檔案，填入您的 OpenAI API Key：
+編輯 `.env` 檔案，填入您的 OpenAI API Key 與模型設定：
 
 ```env
 OPENAI_API_KEY=your_openai_api_key_here
-OPENAI_MODEL=gpt-4-turbo-preview
+# 推薦：一般對話/SQL 皆可用 gpt-4o-mini；或填入 reasoning 模型（如 gpt-5/o-*）
+OPENAI_MODEL=gpt-4o-mini
+# 可選：數據分析問答專用模型，未設定時沿用 OPENAI_MODEL
+SQL_QA_MODEL=
 ```
 
 或者，使用 Streamlit secrets (推薦用於生產環境)：
@@ -154,17 +157,19 @@ poetry run streamlit run src/main.py --server.port 80 --server.address 0.0.0.0
 **篩選條件**：
 
 - 日期範圍
-- 行政區
-- 是否僅顯示危急案件
+- 行政區（單選）
+- 派遣原因（多選）
+- 檢傷分級（多選）
+- 僅顯示危急個案
 
 ### 3. 數據分析問答
 
 **技術實現**：
 
-- 使用 LangChain SQL Agent
-- 將自然語言問題轉換為 SQL 查詢
-- 自動判斷最適合的圖表類型
-- 同時提供文字回答與視覺化圖表
+- LangChain `SQLDatabaseChain`（啟用 `use_query_checker`、回傳 `intermediate_steps`）
+- 自訂 Prompt（內含表結構與欄位語意）提升 SQL 正確率
+- 自動清理模型輸出的 SQL：移除 ```sql/SQLQuery/SQLResult 標記、反引號→雙引號、聚合查詢移除 LIMIT、加入安全檢查
+- 失敗時套用備援 SQL（常見的 GROUP BY 統計），並同時輸出圖表與表格
 
 **功能特色**：
 
@@ -179,6 +184,11 @@ poetry run streamlit run src/main.py --server.port 80 --server.address 0.0.0.0
 - "危急案件的平均反應時間是多少？"
 - "最常見的派遣原因是什麼？"
 - "各檢傷分級的案件數量分布？"
+
+**模型選擇建議**：
+
+- 一般建議 `OPENAI_MODEL=gpt-4o-mini`
+- 若要使用 reasoning 模型（如 gpt-5/o-*），可保留 `OPENAI_MODEL`，或改設 `SQL_QA_MODEL` 專供 SQL 鏈使用；程式已內建相容層處理 stop 參數差異。
 
 ### 4. 行政表單產生器
 
@@ -227,8 +237,7 @@ aero-bloodchain/
     ├── database/              # 資料庫模組
     │   ├── __init__.py
     │   ├── models.py          # SQLAlchemy 模型
-    │   ├── db_manager.py      # 資料庫管理器
-    │   └── loader.py          # 數據載入器
+    │   └── db_manager.py      # 資料庫管理器
     ├── qa_bot/                # 問答機器人模組
     │   ├── __init__.py
     │   ├── manual_qa.py       # 手冊問答
@@ -301,6 +310,41 @@ A: 確認：
 1. 數據中有 `incident_district` 欄位
 2. 行政區名稱符合 `DISTRICT_COORDINATES` 字典
 3. 如需更精確定位，可啟用 geocoding 功能
+
+### Q: 地圖出現 Custom tiles must have an attribution？
+
+A: 已改為手動註冊具 attribution 的圖磚層（CartoDB/OSM/Stamen）。請更新到本版程式或重新啟動。
+
+### Q: 時間序列動畫報 tuple index out of range？
+
+A: 已加入 Plotly 動畫控制的安全檢查，避免在沒有 updatemenus 按鈕時取值失敗。
+
+### Q: SQL 執行時出現 near "```sql"？
+
+A: 我們已在 SQL 執行前清理 Markdown code fence 與 SQLQuery/SQLResult 標記並正規化 SQL。若仍出現，請展開 UI 中的 SQL 查詢區塊貼上，我們可擴充清理規則。
+
+### Q: 匯入腳本或主程式發生 attempted relative import beyond top-level package？
+
+A: 專案已全面改為絕對匯入（`from config ...`），且 `scripts/load_data.py` 會自動將 `src/` 加入 `sys.path`。請確保從專案根目錄執行指令。
+
+### Q: Poetry 安裝專案時顯示 No file/folder found for package？
+
+A: 我們採用依賴管理模式，未將專案註冊為可安裝套件；`pyproject.toml` 已設為 package-mode=false。請直接 `poetry install` 使用依賴與指令。
+
+## 開發指令
+
+格式/靜態檢查：
+
+```bash
+poetry run black src scripts
+poetry run flake8 src scripts
+```
+
+單元測試：
+
+```bash
+poetry run pytest -q
+```
 
 ## 效能優化建議
 
