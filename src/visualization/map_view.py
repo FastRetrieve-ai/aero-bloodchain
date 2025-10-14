@@ -6,7 +6,8 @@ import folium
 from folium.plugins import HeatMap, MarkerCluster, MiniMap, Fullscreen
 import plotly.express as px
 import plotly.graph_objects as go
-from typing import Dict, Any
+from typing import Dict, Any, Optional
+import random
 
 from config import DEFAULT_MAP_CENTER, DEFAULT_MAP_ZOOM
 
@@ -42,6 +43,13 @@ DISTRICT_COORDINATES = {
     '烏來區': [24.8656, 121.5498],
 }
 
+# Performance guardrails
+# Limit the number of markers (popups are heavy) and
+# sample heatmap points to keep payload under Streamlit limits
+MAX_MARKERS: int = 5_000
+HEATMAP_SAMPLE: int = 150_000
+RANDOM_SEED: int = 42
+
 
 def geocode_address(address: str) -> tuple:
     """
@@ -68,7 +76,7 @@ def geocode_address(address: str) -> tuple:
     return None
 
 
-def create_heatmap(df: pd.DataFrame, filters: Dict[str, Any] = None) -> folium.Map:
+def create_heatmap(df: pd.DataFrame, filters: Optional[Dict[str, Any]] = None) -> folium.Map:
     """
     Create an interactive heatmap with markers
     
@@ -123,9 +131,10 @@ def create_heatmap(df: pd.DataFrame, filters: Dict[str, Any] = None) -> folium.M
     Fullscreen(position='topleft').add_to(m)
     
     # Prepare location data
-    locations = []
-    marker_data = []
+    locations: list[list[float]] = []
+    marker_data: list[Dict[str, Any]] = []
     
+    random.seed(RANDOM_SEED)
     for idx, row in df.iterrows():
         # Try to get coordinates
         coords = None
@@ -140,20 +149,28 @@ def create_heatmap(df: pd.DataFrame, filters: Dict[str, Any] = None) -> folium.M
             coords = geocode_address(address)
         
         if coords:
-            locations.append(list(coords))
-            marker_data.append({
-                'coords': coords,
-                'case_number': row.get('case_number', 'N/A'),
-                'date': str(row.get('date', 'N/A')),
-                'dispatch_reason': row.get('dispatch_reason', 'N/A'),
-                'district': row.get('incident_district', 'N/A'),
-                'triage_level': row.get('triage_level', 'N/A'),
-                'hospital': row.get('destination_hospital', 'N/A'),
-                'critical': row.get('critical_case', False)
-            })
+            # Append coordinates for heatmap (full set; will sample below)
+            locations.append([float(coords[0]), float(coords[1])])
+
+            # Only accumulate marker info up to MAX_MARKERS
+            if len(marker_data) < MAX_MARKERS:
+                marker_data.append({
+                    'coords': [float(coords[0]), float(coords[1])],
+                    'case_number': row.get('case_number', 'N/A'),
+                    'date': str(row.get('date', 'N/A')),
+                    'dispatch_reason': row.get('dispatch_reason', 'N/A'),
+                    'district': row.get('incident_district', 'N/A'),
+                    'triage_level': row.get('triage_level', 'N/A'),
+                    'hospital': row.get('destination_hospital', 'N/A'),
+                    'critical': bool(row.get('critical_case', False))
+                })
     
     # Add heatmap layer
     if locations:
+        # Sample heatmap points to cap payload size
+        if len(locations) > HEATMAP_SAMPLE:
+            locations = random.sample(locations, HEATMAP_SAMPLE)
+
         HeatMap(
             locations,
             radius=18,
@@ -162,33 +179,21 @@ def create_heatmap(df: pd.DataFrame, filters: Dict[str, Any] = None) -> folium.M
             gradient={0.4: '#74add1', 0.6: '#fdae61', 0.8: '#f46d43', 1.0: '#d73027'}
         ).add_to(m)
 
-        # Add marker cluster
-        marker_cluster = MarkerCluster(name="案件標記").add_to(m)
+        # Add marker cluster only when under threshold
+        if marker_data:
+            marker_cluster = MarkerCluster(name="案件標記").add_to(m)
 
-        for data in marker_data:
-            # Set icon color based on criticality
-            icon_color = 'red' if data['critical'] else 'blue'
+            for data in marker_data:
+                icon_color = 'red' if data['critical'] else 'blue'
+                popup_html = f"""
+                <div style=\"width: 260px;\">\n                    <h4 style=\"margin-bottom:6px;\">案件 {data['case_number']}</h4>\n                    <table style=\"width:100%;font-size:13px;\">\n                        <tr><td><b>日期：</b></td><td>{data['date']}</td></tr>\n                        <tr><td><b>派遣原因：</b></td><td>{data['dispatch_reason']}</td></tr>\n                        <tr><td><b>行政區：</b></td><td>{data['district']}</td></tr>\n                        <tr><td><b>檢傷分級：</b></td><td>{data['triage_level']}</td></tr>\n                        <tr><td><b>後送醫院：</b></td><td>{data['hospital']}</td></tr>\n                        <tr><td><b>危急個案：</b></td><td>{'是' if data['critical'] else '否'}</td></tr>\n                    </table>\n                </div>
+                """
 
-            # Create popup content
-            popup_html = f"""
-            <div style="width: 260px;">
-                <h4 style="margin-bottom:6px;">案件 {data['case_number']}</h4>
-                <table style="width:100%;font-size:13px;">
-                    <tr><td><b>日期：</b></td><td>{data['date']}</td></tr>
-                    <tr><td><b>派遣原因：</b></td><td>{data['dispatch_reason']}</td></tr>
-                    <tr><td><b>行政區：</b></td><td>{data['district']}</td></tr>
-                    <tr><td><b>檢傷分級：</b></td><td>{data['triage_level']}</td></tr>
-                    <tr><td><b>後送醫院：</b></td><td>{data['hospital']}</td></tr>
-                    <tr><td><b>危急個案：</b></td><td>{'是' if data['critical'] else '否'}</td></tr>
-                </table>
-            </div>
-            """
-
-            folium.Marker(
-                location=data['coords'],
-                popup=folium.Popup(popup_html, max_width=320),
-                icon=folium.Icon(color=icon_color, icon='ambulance', prefix='fa')
-            ).add_to(marker_cluster)
+                folium.Marker(
+                    location=data['coords'],
+                    popup=folium.Popup(popup_html, max_width=320),
+                    icon=folium.Icon(color=icon_color, icon='ambulance', prefix='fa')
+                ).add_to(marker_cluster)
 
     folium.LayerControl(collapsed=False).add_to(m)
     return m
@@ -292,3 +297,76 @@ def create_time_animation_map(df: pd.DataFrame) -> go.Figure:
             button_args[1]["transition"]["duration"] = 300
     
     return fig
+
+
+def create_hex_density_map(
+    df: pd.DataFrame,
+    *,
+    resolution: int = 8,
+    show_3d: bool = True,
+):
+    """Create a hexagon density map using pydeck + H3.
+
+    Aggregates points into H3 hexagons to dramatically reduce payload size.
+    Returns a pydeck.Deck object if dependencies are available; otherwise None.
+    """
+    try:
+        import pydeck as pdk  # type: ignore
+        import h3  # type: ignore
+        import numpy as np  # noqa: F401
+    except Exception:
+        return None
+
+    # Build coordinates from district centers
+    coords_series = df.get('incident_district', pd.Series(dtype=object)).map(DISTRICT_COORDINATES)
+    if coords_series is None or coords_series.empty:
+        return None
+
+    lat = coords_series.apply(lambda v: float(v[0]) if isinstance(v, (list, tuple)) else float('nan'))
+    lon = coords_series.apply(lambda v: float(v[1]) if isinstance(v, (list, tuple)) else float('nan'))
+    points = pd.DataFrame({'lat': lat, 'lon': lon}).dropna()
+    if points.empty:
+        return None
+
+    points = points.astype({'lat': 'float32', 'lon': 'float32'})
+    points['hex'] = points.apply(lambda r: h3.geo_to_h3(float(r.lat), float(r.lon), resolution), axis=1)
+
+    agg = points.groupby('hex').size().reset_index(name='count')
+    max_cnt = max(1, int(agg['count'].max()))
+    agg['norm'] = (agg['count'] / float(max_cnt)).clip(0.0, 1.0)
+
+    def to_color(p: float) -> list[int]:
+        # Blue -> Red gradient
+        r = int(69 + (215 - 69) * p)
+        g = int(117 + (53 - 117) * p)
+        b = int(180 + (39 - 180) * p)
+        return [r, g, b]
+
+    agg['color'] = agg['norm'].apply(to_color)
+
+    layer = pdk.Layer(
+        'H3HexagonLayer',
+        data=agg,
+        get_hexagon='hex',
+        get_fill_color='color',
+        get_elevation='count',
+        elevation_scale=10,
+        extruded=bool(show_3d),
+        pickable=True,
+    )
+
+    tooltip = {
+        'html': '<b>案件數:</b> {count}',
+        'style': {'backgroundColor': 'steelblue', 'color': 'white'},
+    }
+
+    view_state = pdk.ViewState(
+        latitude=float(DEFAULT_MAP_CENTER[0]),
+        longitude=float(DEFAULT_MAP_CENTER[1]),
+        zoom=float(DEFAULT_MAP_ZOOM),
+        pitch=40 if show_3d else 0,
+        bearing=0,
+    )
+
+    deck = pdk.Deck(layers=[layer], initial_view_state=view_state, map_style='carto-positron', tooltip=tooltip)
+    return deck

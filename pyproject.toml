@@ -28,6 +28,8 @@ streamlit-folium = "^0.17.0"
 geopy = "^2.4.1"
 scikit-learn = "^1.4.0"
 langchain-experimental = "^0.3.4"
+pydeck = "^0.9.1"
+h3 = "^3.7.6"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.4.4"
