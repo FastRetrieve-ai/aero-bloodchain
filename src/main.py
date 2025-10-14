@@ -448,16 +448,19 @@ def page_forms():
 
 def main():
     """Main application"""
-    
+
     # Header
     st.title(f"🚁 {APP_TITLE}")
     st.caption(APP_SUBTITLE)
-    
+
     # Check API key
     if not check_api_key():
         st.stop()
-    
+
     # Sidebar navigation
+    with st.sidebar:
+        st.image("images/logo.jpg", use_container_width=True)
+
     st.sidebar.title("📋 功能選單")
     page = st.sidebar.radio(
         "選擇功能",
@@ -468,9 +471,9 @@ def main():
             "📄 行政表單產生"
         ]
     )
-    
+
     st.sidebar.divider()
-    
+
     # Display selected page
     if page == "📋 緊急救護問答":
         page_manual_qa()
@@ -480,9 +483,12 @@ def main():
         page_analytics()
     elif page == "📄 行政表單產生":
         page_forms()
-    
+
     # Footer
     st.sidebar.divider()
+
+    # with st.sidebar:
+    #     st.image("images/logo.jpg", use_container_width=True)
     st.sidebar.caption("© 2025 熱血飛騰：血品供應韌性系統")
     st.sidebar.caption("Emergency Blood Chain System")
 
