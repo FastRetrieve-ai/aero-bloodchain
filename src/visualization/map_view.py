@@ -15,35 +15,51 @@ from config import DEFAULT_MAP_CENTER, DEFAULT_MAP_ZOOM
 
 # District coordinates for New Taipei City
 DISTRICT_COORDINATES = {
-    '板橋區': [25.0116, 121.4625],
-    '新莊區': [25.0372, 121.4325],
-    '中和區': [24.9994, 121.4991],
-    '永和區': [25.0039, 121.5156],
-    '土城區': [24.9733, 121.4420],
-    '樹林區': [24.9906, 121.4201],
-    '三峽區': [24.9342, 121.3697],
-    '鶯歌區': [24.9545, 121.3538],
-    '三重區': [25.0619, 121.4885],
-    '蘆洲區': [25.0847, 121.4741],
-    '五股區': [25.0829, 121.4384],
-    '泰山區': [25.0572, 121.4301],
-    '林口區': [25.0770, 121.3926],
-    '淡水區': [25.1688, 121.4406],
-    '金山區': [25.2217, 121.6370],
-    '萬里區': [25.1797, 121.6891],
-    '汐止區': [25.0672, 121.6423],
-    '瑞芳區': [25.1089, 121.8058],
-    '貢寮區': [25.0202, 121.9086],
-    '平溪區': [25.0258, 121.7391],
-    '雙溪區': [25.0347, 121.8656],
-    '石碇區': [24.9959, 121.6582],
-    '深坑區': [25.0023, 121.6165],
-    '石門區': [25.2906, 121.5685],
-    '八里區': [25.1448, 121.3967],
-    '坪林區': [24.9360, 121.7108],
-    '烏來區': [24.8656, 121.5498],
+    "板橋區": [25.0116, 121.4625],
+    "新莊區": [25.0372, 121.4325],
+    "中和區": [24.9994, 121.4991],
+    "永和區": [25.0039, 121.5156],
+    "土城區": [24.9733, 121.4420],
+    "樹林區": [24.9906, 121.4201],
+    "三峽區": [24.9342, 121.3697],
+    "鶯歌區": [24.9545, 121.3538],
+    "三重區": [25.0619, 121.4885],
+    "蘆洲區": [25.0847, 121.4741],
+    "五股區": [25.0829, 121.4384],
+    "泰山區": [25.0572, 121.4301],
+    "林口區": [25.0770, 121.3926],
+    "淡水區": [25.1688, 121.4406],
+    "金山區": [25.2217, 121.6370],
+    "萬里區": [25.1797, 121.6891],
+    "汐止區": [25.0672, 121.6423],
+    "瑞芳區": [25.1089, 121.8058],
+    "貢寮區": [25.0202, 121.9086],
+    "平溪區": [25.0258, 121.7391],
+    "雙溪區": [25.0347, 121.8656],
+    "石碇區": [24.9959, 121.6582],
+    "深坑區": [25.0023, 121.6165],
+    "石門區": [25.2906, 121.5685],
+    "八里區": [25.1448, 121.3967],
+    "坪林區": [24.9360, 121.7108],
+    "烏來區": [24.8656, 121.5498],
+    "三芝區": [25.2598, 121.5008],
 }
 
+DISTRICT_COORDINATES.update({
+    # 基隆市
+    "中山區": [25.1501, 121.7329],   # Keelung Zhongshan Dist.
+    "中正區": [25.1425, 121.7747],   # Keelung Zhongzheng Dist.
+    "暖暖區": [25.1014, 121.7377],   # Nuannuan Station vicinity
+    # 新北市
+    "新店區": [24.9678, 121.5414],   # Xindian District Office Station
+    # 桃園市
+    "八德區": [24.9546, 121.2926],   # Bade District
+    "大溪區": [24.8806, 121.2871],   # Daxi District
+    "蘆竹區": [25.0333, 121.2833],   # Luzhu District 
+    "龜山區": [24.9950, 121.3381],   # Guishan District (區公所附近)  
+    # 南投縣
+    "集集鎮": [23.8286, 120.7864],   # Jiji Township
+})
 
 
 def geocode_address(address: str) -> tuple:
@@ -103,7 +119,7 @@ def create_heatmap(
             df = df[df['triage_level'].isin(filters['triage_levels'])]
         if 'critical_only' in filters and filters['critical_only'] and 'critical_case' in df.columns:
             df = df[df['critical_case'] == True]
-    
+
     # Create base map
     m = folium.Map(
         location=DEFAULT_MAP_CENTER,
@@ -131,7 +147,7 @@ def create_heatmap(
     ).add_to(m)
     MiniMap(toggle_display=True).add_to(m)
     Fullscreen(position='topleft').add_to(m)
-    
+
     # Prepare aggregated statistics by district to minimize payload
     if 'incident_district' not in df.columns:
         folium.LayerControl(collapsed=False).add_to(m)
@@ -176,10 +192,11 @@ def create_heatmap(
             min_count -= 1
             max_count += 1
         color_scale = LinearColormap(
-            colors=['#2b8cbe', '#7fcdbb', '#edf8b1', '#fc8d59', '#d7301f'],
+            # colors=['#2b8cbe', '#7fcdbb', '#edf8b1', '#fc8d59', '#d7301f'],
+            colors=["#31a354", "#006837", "#ffffb2", "#fe9929", "#d95f0e"],
             vmin=min_count,
             vmax=max_count,
-            caption='行政區案件數',
+            caption="行政區案件數",
         )
         color_scale.add_to(m)
 
@@ -221,14 +238,16 @@ def create_heatmap(
             ).add_to(m)
 
             # Add count label at circle center
-            font_size = max(11, min(22, radius * 1.1))
+            # font_size = max(11, min(22, radius * 1.1))
+            font_size = 12
+
             label_html = (
                 '<div style="display:flex;align-items:center;justify-content:center;'
-                'transform: translate(-50%, -50%);'
-                'width:100%;height:100%;"
-                '><span style="font-size:{fs}px;font-weight:600;color:#1a1a1a;'
+                'transform: translate(0%, 0%);'
+                'width:100%;height:100%;">'
+                '<span style="font-size:{fs}px;font-style:bold;color:#000000;'
                 'padding:2px 6px;border-radius:12px;'
-                'background:rgba(255,255,255,0.85);box-shadow:0 0 6px rgba(0,0,0,0.2);">{count}</span></div>'
+                '">{count}</span></div>'
             ).format(fs=int(font_size), count=f"{int(row['count']):,}")
             folium.map.Marker(
                 location=[row['lat'], row['lon']],

@@ -135,34 +135,34 @@ def page_maps():
     """Page 2: Interactive Case Maps"""
     st.title("🗺️ 急救案件地理視覺化")
     st.markdown("互動式地圖顯示急救案件分布與時間變化")
-    
+
     # Initialize database
     db_manager = DatabaseManager()
-    
+
     # Sidebar filters
     st.sidebar.subheader("地圖篩選條件")
-    
+
     try:
         districts = sorted([d for d in db_manager.get_distinct_values('incident_district') if d])
     except Exception:
         districts = []
     selected_district = st.sidebar.selectbox("行政區", ["全部"] + districts)
-    
+
     try:
         dispatch_options = sorted([d for d in db_manager.get_distinct_values('dispatch_reason') if d])
     except Exception:
         dispatch_options = []
     selected_dispatch = st.sidebar.multiselect("派遣原因", dispatch_options)
-    
+
     try:
         triage_options = sorted([t for t in db_manager.get_distinct_values('triage_level') if t])
     except Exception:
         triage_options = []
     selected_triage = st.sidebar.multiselect("檢傷分級", triage_options)
-    
+
     date_range = st.sidebar.date_input("日期範圍", [])
     critical_only = st.sidebar.checkbox("僅顯示危急個案")
-    
+
     filters = {}
     if selected_district != "全部":
         filters['district'] = selected_district
@@ -177,30 +177,30 @@ def page_maps():
         filters['triage_levels'] = selected_triage
     if critical_only:
         filters['critical_only'] = True
-    
+
     try:
         df = db_manager.get_cases_dataframe(filters)
-        
+
         if df.empty:
             st.warning("沒有符合條件的資料")
             return
-        
+
         st.info(f"符合條件的案件共 {len(df)} 筆")
-        
+
         critical_cases = 0
         if 'critical_case' in df.columns:
             critical_cases = int(df['critical_case'].fillna(False).astype(int).sum())
-        
+
         avg_response_minutes = None
         if 'response_time_seconds' in df.columns:
             response_series = df['response_time_seconds'].dropna()
             if not response_series.empty:
                 avg_response_minutes = response_series.mean() / 60
-        
+
         covered_districts = df['incident_district'].nunique() if 'incident_district' in df.columns else 0
         period_start = df['date'].min() if 'date' in df.columns else None
         period_end = df['date'].max() if 'date' in df.columns else None
-        
+
         metric_cols = st.columns(4)
         metric_cols[0].metric("案件數", f"{len(df):,}")
         metric_cols[1].metric("危急案件", f"{critical_cases:,}")
@@ -209,24 +209,25 @@ def page_maps():
         else:
             metric_cols[2].metric("平均反應時間 (分)", "—")
         metric_cols[3].metric("涵蓋行政區", f"{covered_districts}")
-        
+
         if period_start is not None and period_end is not None:
             st.caption(f"資料期間：{period_start:%Y-%m-%d} ～ {period_end:%Y-%m-%d}")
-        
+
         tab_heatmap, tab_animation, tab_stats = st.tabs(["📍 熱力圖與標記", "⏱️ 時間序列動畫", "📊 統計圖表"])
-        
+
         with tab_heatmap:
             st.markdown("透過熱力圖快速掌握案件密度，並利用標記瀏覽案件細節。")
             map_mode = st.radio(
                 "地圖模式",
-                ["Folium 熱力圖", "Hex 聚合地圖 (pydeck)", "Pydeck 熱力圖 (全量)"]
-                ,horizontal=True,
+                # ["Folium 熱力圖", "Hex 聚合地圖 (pydeck)", "Pydeck 熱力圖 (全量)"]
+                ["Folium 熱力圖"],
+                horizontal=True,
             )
 
             if map_mode == "Folium 熱力圖":
                 with st.spinner("生成熱力圖..."):
                     heatmap = create_heatmap(df, filters)
-                    st_folium(heatmap, width=None, height=520, returned_objects=[])
+                    st_folium(heatmap, width=None, height=800, returned_objects=[])
                 st.caption(" Folium 熱力圖已改為依行政區聚合，避免大量資料傳輸。")
             elif map_mode == "Hex 聚合地圖 (pydeck)":
                 with st.spinner("生成 Hex 聚合地圖..."):
@@ -246,18 +247,18 @@ def page_maps():
                     else:
                         st.pydeck_chart(deck, use_container_width=True, height=520)
                 st.caption("此模式會傳送所有點位，適合強機或生產部署環境。")
-        
+
         with tab_animation:
             st.markdown("時間序列動畫呈現案件發生的累積趨勢與時空分布。")
             with st.spinner("生成時間動畫..."):
                 animation_fig = create_time_animation_map(df)
                 st.plotly_chart(animation_fig, use_container_width=True)
-        
+
         with tab_stats:
             st.markdown("多維統計視角幫助追蹤行政區、時段與檢傷等核心指標。")
             with st.spinner("生成統計圖表..."):
                 charts = create_statistics_charts(df)
-                
+
                 chart_order = [
                     "time_line",
                     "critical_trend",
@@ -269,7 +270,7 @@ def page_maps():
                     "hospital_bar",
                 ]
                 available_charts = [key for key in chart_order if key in charts]
-                
+
                 if not available_charts:
                     st.info("目前沒有可顯示的統計圖表。")
                 else:
@@ -278,7 +279,7 @@ def page_maps():
                         for col, key in zip(cols, available_charts[i:i+2]):
                             with col:
                                 st.plotly_chart(charts[key], use_container_width=True)
-    
+
     except Exception as e:
         st.error(f"載入地圖時發生錯誤：{e}")
 
