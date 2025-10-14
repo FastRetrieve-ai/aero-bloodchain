@@ -286,13 +286,19 @@ def create_hex_density_map(
     except Exception:
         return None
 
-    # Build coordinates from district centers
-    coords_series = df.get('incident_district', pd.Series(dtype=object)).map(DISTRICT_COORDINATES)
-    if coords_series is None or coords_series.empty:
-        return None
-
-    lat = coords_series.apply(lambda v: float(v[0]) if isinstance(v, (list, tuple)) else float('nan'))
-    lon = coords_series.apply(lambda v: float(v[1]) if isinstance(v, (list, tuple)) else float('nan'))
+    # Prefer explicit lat/lon if available, otherwise map by administrative district
+    if {'lat', 'lon'}.issubset(df.columns):
+        lat = pd.to_numeric(df['lat'], errors='coerce')
+        lon = pd.to_numeric(df['lon'], errors='coerce')
+    elif {'latitude', 'longitude'}.issubset(df.columns):
+        lat = pd.to_numeric(df['latitude'], errors='coerce')
+        lon = pd.to_numeric(df['longitude'], errors='coerce')
+    else:
+        coords_series = df.get('incident_district', pd.Series(dtype=object)).map(DISTRICT_COORDINATES)
+        if coords_series is None or coords_series.empty:
+            return None
+        lat = coords_series.apply(lambda v: float(v[0]) if isinstance(v, (list, tuple)) else float('nan'))
+        lon = coords_series.apply(lambda v: float(v[1]) if isinstance(v, (list, tuple)) else float('nan'))
     points = pd.DataFrame({'lat': lat, 'lon': lon}).dropna()
     if points.empty:
         return None
@@ -372,12 +378,19 @@ def create_deck_heatmap(
     except Exception:
         return None
 
-    coords_series = df.get('incident_district', pd.Series(dtype=object)).map(DISTRICT_COORDINATES)
-    if coords_series is None or coords_series.empty:
-        return None
-
-    lat = coords_series.apply(lambda v: float(v[0]) if isinstance(v, (list, tuple)) else float('nan'))
-    lon = coords_series.apply(lambda v: float(v[1]) if isinstance(v, (list, tuple)) else float('nan'))
+    # Prefer explicit lat/lon if available, otherwise map by administrative district
+    if {'lat', 'lon'}.issubset(df.columns):
+        lat = pd.to_numeric(df['lat'], errors='coerce')
+        lon = pd.to_numeric(df['lon'], errors='coerce')
+    elif {'latitude', 'longitude'}.issubset(df.columns):
+        lat = pd.to_numeric(df['latitude'], errors='coerce')
+        lon = pd.to_numeric(df['longitude'], errors='coerce')
+    else:
+        coords_series = df.get('incident_district', pd.Series(dtype=object)).map(DISTRICT_COORDINATES)
+        if coords_series is None or coords_series.empty:
+            return None
+        lat = coords_series.apply(lambda v: float(v[0]) if isinstance(v, (list, tuple)) else float('nan'))
+        lon = coords_series.apply(lambda v: float(v[1]) if isinstance(v, (list, tuple)) else float('nan'))
     points = pd.DataFrame({'lat': lat, 'lon': lon}).dropna()
     if points.empty:
         return None
