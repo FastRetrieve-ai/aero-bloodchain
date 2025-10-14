@@ -225,8 +225,13 @@ def page_maps():
 
             if map_mode == "Folium 熱力圖":
                 with st.spinner("生成熱力圖..."):
-                    # Folium 端預設啟用採樣；若要完整 42 萬點可將 max_heatmap_points=None
-                    heatmap = create_heatmap(df, filters, max_heatmap_points=None if st.checkbox("不採樣 (可能較慢)") else None)
+                    # Folium 端預設啟用採樣；勾選可改為全量
+                    no_sample = st.checkbox("不採樣 (可能較慢)")
+                    heatmap = create_heatmap(
+                        df,
+                        filters,
+                        max_heatmap_points=None if no_sample else 150000,
+                    )
                     st_folium(heatmap, width=None, height=520, returned_objects=[])
                 st.caption(
                     "大量資料時將自動採樣熱力圖，並關閉部分標記以避免瀏覽器過載。"
