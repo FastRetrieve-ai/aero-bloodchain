@@ -176,11 +176,11 @@ def create_heatmap(
             min_count -= 1
             max_count += 1
         color_scale = LinearColormap(
-            colors=['#c7e9f1', '#6baed6', '#2171b5', '#08306b'],
+            colors=['#2b8cbe', '#7fcdbb', '#edf8b1', '#fc8d59', '#d7301f'],
             vmin=min_count,
             vmax=max_count,
+            caption='行政區案件數',
         )
-        color_scale.caption = '行政區案件數'
         color_scale.add_to(m)
 
         # Add one marker per district summarizing key metrics
@@ -211,8 +211,8 @@ def create_heatmap(
             folium.CircleMarker(
                 location=[row['lat'], row['lon']],
                 radius=radius,
-                color='#2a5674',
-                weight=1.5,
+                color='#444444',
+                weight=1.0,
                 fill=True,
                 fill_color=fill_color,
                 fill_opacity=0.75,
@@ -221,15 +221,22 @@ def create_heatmap(
             ).add_to(m)
 
             # Add count label at circle center
-            font_size = max(11, min(20, radius * 1.2))
+            font_size = max(11, min(22, radius * 1.1))
             label_html = (
-                f'<div style="transform: translate(-50%, -50%); '
-                f'font-size:{font_size}px; font-weight:600; color:#08306b; '
-                f'text-shadow:0 0 6px rgba(255,255,255,0.85);">{int(row["count"]):,}</div>'
-            )
+                '<div style="display:flex;align-items:center;justify-content:center;'
+                'transform: translate(-50%, -50%);'
+                'width:100%;height:100%;"
+                '><span style="font-size:{fs}px;font-weight:600;color:#1a1a1a;'
+                'padding:2px 6px;border-radius:12px;'
+                'background:rgba(255,255,255,0.85);box-shadow:0 0 6px rgba(0,0,0,0.2);">{count}</span></div>'
+            ).format(fs=int(font_size), count=f"{int(row['count']):,}")
             folium.map.Marker(
                 location=[row['lat'], row['lon']],
-                icon=folium.DivIcon(html=label_html, icon_size=(1, 1), icon_anchor=(0, 0)),
+                icon=folium.DivIcon(
+                    html=label_html,
+                    icon_size=(int(radius * 2), int(radius * 2)),
+                    icon_anchor=(int(radius), int(radius)),
+                ),
             ).add_to(m)
 
     folium.LayerControl(collapsed=False).add_to(m)
