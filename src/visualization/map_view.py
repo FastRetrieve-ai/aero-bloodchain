@@ -3,7 +3,8 @@ Interactive map visualizations for emergency cases
 """
 import pandas as pd
 import folium
-from folium.plugins import HeatMap, MarkerCluster, MiniMap, Fullscreen
+from folium.plugins import HeatMap, MiniMap, Fullscreen
+from branca.colormap import LinearColormap
 import plotly.express as px
 import plotly.graph_objects as go
 from typing import Dict, Any, Optional
@@ -167,8 +168,23 @@ def create_heatmap(
             gradient={0.3: '#74add1', 0.6: '#fdae61', 0.8: '#f46d43', 1.0: '#d73027'}
         ).add_to(m)
 
+        # Color scale for circle markers (lighter for少量, darker for大量)
+        min_count = float(agg_df['count'].min())
+        max_count = float(agg_df['count'].max())
+        if min_count == max_count:
+            # Expand range slightly to avoid degenerate colormap
+            min_count -= 1
+            max_count += 1
+        color_scale = LinearColormap(
+            colors=['#c7e9f1', '#6baed6', '#2171b5', '#08306b'],
+            vmin=min_count,
+            vmax=max_count,
+        )
+        color_scale.caption = '行政區案件數'
+        color_scale.add_to(m)
+
         # Add one marker per district summarizing key metrics
-        max_count = agg_df['count'].max()
+        max_count_root = math.sqrt(float(agg_df['count'].max())) if max_count > 0 else 1.0
         for _, row in agg_df.iterrows():
             popup_html = """
             <div style=\"width: 260px;\">
@@ -188,18 +204,32 @@ def create_heatmap(
                 avg_response=avg_response_disp,
             )
 
-            # Scale circle radius by square root to avoid huge values
-            radius = 8 + 20 * math.sqrt(row['count'] / max_count) if max_count else 10
+            # Scale circle radius by square root to avoid極端差距
+            radius = 8 + 20 * (math.sqrt(row['count']) / max_count_root) if max_count_root else 10
+            fill_color = color_scale(float(row['count']))
 
             folium.CircleMarker(
                 location=[row['lat'], row['lon']],
                 radius=radius,
-                color='#2b8cbe',
+                color='#2a5674',
+                weight=1.5,
                 fill=True,
-                fill_color='#2b8cbe',
-                fill_opacity=0.65,
+                fill_color=fill_color,
+                fill_opacity=0.75,
                 tooltip=f"{row['incident_district']}：{int(row['count']):,} 件",
                 popup=folium.Popup(popup_html, max_width=320),
+            ).add_to(m)
+
+            # Add count label at circle center
+            font_size = max(11, min(20, radius * 1.2))
+            label_html = (
+                f'<div style="transform: translate(-50%, -50%); '
+                f'font-size:{font_size}px; font-weight:600; color:#08306b; '
+                f'text-shadow:0 0 6px rgba(255,255,255,0.85);">{int(row["count"]):,}</div>'
+            )
+            folium.map.Marker(
+                location=[row['lat'], row['lon']],
+                icon=folium.DivIcon(html=label_html, icon_size=(1, 1), icon_anchor=(0, 0)),
             ).add_to(m)
 
     folium.LayerControl(collapsed=False).add_to(m)
