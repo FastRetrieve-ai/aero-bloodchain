@@ -46,8 +46,8 @@ DISTRICT_COORDINATES = {
 # Performance guardrails
 # Limit the number of markers (popups are heavy) and
 # sample heatmap points to keep payload under Streamlit limits
-MAX_MARKERS: int = 5_000
-HEATMAP_SAMPLE: int = 150_000
+MAX_MARKERS: int = 5000
+HEATMAP_SAMPLE: int = 150000
 RANDOM_SEED: int = 42
 
 
@@ -76,7 +76,12 @@ def geocode_address(address: str) -> tuple:
     return None
 
 
-def create_heatmap(df: pd.DataFrame, filters: Optional[Dict[str, Any]] = None) -> folium.Map:
+def create_heatmap(
+    df: pd.DataFrame,
+    filters: Optional[Dict[str, Any]] = None,
+    *,
+    max_heatmap_points: Optional[int] = HEATMAP_SAMPLE,
+) -> folium.Map:
     """
     Create an interactive heatmap with markers
     
@@ -167,9 +172,9 @@ def create_heatmap(df: pd.DataFrame, filters: Optional[Dict[str, Any]] = None) -
     
     # Add heatmap layer
     if locations:
-        # Sample heatmap points to cap payload size
-        if len(locations) > HEATMAP_SAMPLE:
-            locations = random.sample(locations, HEATMAP_SAMPLE)
+        # Sample heatmap points to cap payload size (unless None)
+        if max_heatmap_points is not None and len(locations) > max_heatmap_points:
+            locations = random.sample(locations, max_heatmap_points)
 
         HeatMap(
             locations,
@@ -201,101 +206,65 @@ def create_heatmap(df: pd.DataFrame, filters: Optional[Dict[str, Any]] = None) -
 
 def create_time_animation_map(df: pd.DataFrame) -> go.Figure:
     """
-    Create an animated map showing cases over time with clustering
-    
-    Args:
-        df: DataFrame with emergency cases
-    
-    Returns:
-        plotly Figure object with animation
+    Animated map where bubble size encodes case count by day+district and
+    color encodes critical ratio.
     """
-    # Prepare data with coordinates
-    map_data = []
-    
-    for idx, row in df.iterrows():
-        district = row.get('incident_district')
-        if district and district in DISTRICT_COORDINATES:
-            coords = DISTRICT_COORDINATES[district]
-            
-            # Parse date
-            date = row.get('date')
-            if pd.notna(date):
-                if isinstance(date, str):
-                    try:
-                        date = pd.to_datetime(date)
-                    except:
-                        continue
-                
-                map_data.append({
-                    'lat': coords[0],
-                    'lon': coords[1],
-                    'date': date,
-                    'date_str': date.strftime('%Y-%m-%d'),
-                    'case_number': row.get('case_number', 'N/A'),
-                    'dispatch_reason': row.get('dispatch_reason', 'N/A'),
-                    'district': district,
-                    'triage_level': row.get('triage_level', 'N/A'),
-                    'critical': row.get('critical_case', False)
-                })
-    
-    if not map_data:
-        # Return empty figure
+    df_anim = df.copy()
+    if 'date' not in df_anim.columns or 'incident_district' not in df_anim.columns:
         fig = go.Figure()
-        fig.update_layout(
-            title="無可用的地理位置資料",
-            height=600
-        )
+        fig.update_layout(title="缺少日期或行政區欄位", height=600)
         return fig
-    
-    # Create DataFrame
-    map_df = pd.DataFrame(map_data)
-    map_df = map_df.sort_values('date')
-    
-    # Create animated scatter mapbox
+
+    df_anim['date'] = pd.to_datetime(df_anim['date'], errors='coerce')
+    df_anim = df_anim[df_anim['date'].notna()]
+    if df_anim.empty:
+        fig = go.Figure()
+        fig.update_layout(title="無可用的地理位置資料", height=600)
+        return fig
+
+    df_anim['date_only'] = df_anim['date'].dt.date
+    df_anim['critical_case'] = df_anim.get('critical_case', False).fillna(False).astype(int)
+    grouped = df_anim.groupby(['date_only', 'incident_district']).agg(
+        count=('incident_district', 'size'),
+        critical_count=('critical_case', 'sum'),
+    ).reset_index()
+    grouped['date_str'] = grouped['date_only'].astype(str)
+    grouped['critical_ratio'] = (grouped['critical_count'] / grouped['count']).fillna(0.0)
+    grouped['lat'] = grouped['incident_district'].map(lambda d: DISTRICT_COORDINATES.get(d, [None, None])[0])
+    grouped['lon'] = grouped['incident_district'].map(lambda d: DISTRICT_COORDINATES.get(d, [None, None])[1])
+    map_df = grouped.dropna(subset=['lat', 'lon']).copy().sort_values('date_only')
+    if map_df.empty:
+        fig = go.Figure()
+        fig.update_layout(title="無可用的地理位置資料", height=600)
+        return fig
+
     fig = px.scatter_mapbox(
         map_df,
         lat='lat',
         lon='lon',
+        size='count',
+        size_max=48,
+        color='critical_ratio',
+        color_continuous_scale='YlOrRd',
+        range_color=(0, 1),
+        hover_name='incident_district',
+        hover_data={'count': True, 'critical_ratio': ':.2f', 'lat': False, 'lon': False},
         animation_frame='date_str',
-        hover_name='case_number',
-        hover_data={
-            'dispatch_reason': True,
-            'district': True,
-            'triage_level': True,
-            'lat': False,
-            'lon': False,
-            'date_str': False
-        },
-        color='critical',
-        color_discrete_map={True: '#d73027', False: '#4575b4'},
-        labels={'critical': '危急個案'},
         zoom=10,
         center={'lat': DEFAULT_MAP_CENTER[0], 'lon': DEFAULT_MAP_CENTER[1]},
         mapbox_style='carto-positron',
         height=600,
-        title='急救案件時間序列動畫'
+        title='急救案件時間序列動畫（氣泡=案件數，顏色=危急比率）',
     )
-    
-    # Update layout
-    fig.update_layout(
-        hovermode='closest',
-        showlegend=True,
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1
-        )
-    )
-    
-    # Update animation speed
+
+    fig.update_layout(hovermode='closest', coloraxis_colorbar=dict(title='危急比率'))
+
     if fig.layout.updatemenus and fig.layout.updatemenus[0].buttons:
         button_args = fig.layout.updatemenus[0].buttons[0].args
-        if len(button_args) > 1 and "frame" in button_args[1] and "transition" in button_args[1]:
-            button_args[1]["frame"]["duration"] = 500
-            button_args[1]["transition"]["duration"] = 300
-    
+        if len(button_args) > 1 and 'frame' in button_args[1] and 'transition' in button_args[1]:
+            button_args[1]['frame']['duration'] = 500
+            button_args[1]['transition']['duration'] = 300
+
     return fig
 
 
@@ -336,13 +305,24 @@ def create_hex_density_map(
     agg['norm'] = (agg['count'] / float(max_cnt)).clip(0.0, 1.0)
 
     def to_color(p: float) -> list[int]:
-        # Blue -> Red gradient
-        r = int(69 + (215 - 69) * p)
-        g = int(117 + (53 - 117) * p)
-        b = int(180 + (39 - 180) * p)
-        return [r, g, b]
+        # clamp 0..1 and map to YlOrRd-like gradient with alpha
+        p = 0 if p < 0 else (1 if p > 1 else p)
+        if p < 0.5:
+            t = p / 0.5
+            r = int(255 * (1 - t) + 254 * t)
+            g = int(255 * (1 - t) + 178 * t)
+            b = int(178 * (1 - t) + 76 * t)
+        else:
+            t = (p - 0.5) / 0.5
+            r = int(254 * (1 - t) + 240 * t)
+            g = int(178 * (1 - t) + 59 * t)
+            b = int(76 * (1 - t) + 32 * t)
+        return [r, g, b, 200]
 
     agg['color'] = agg['norm'].apply(to_color)
+
+    elev_ref = float(agg['count'].quantile(0.95)) if not agg.empty else 1.0
+    elev_scale = 40.0 / elev_ref if elev_ref > 0 else 10.0
 
     layer = pdk.Layer(
         'H3HexagonLayer',
@@ -350,9 +330,13 @@ def create_hex_density_map(
         get_hexagon='hex',
         get_fill_color='color',
         get_elevation='count',
-        elevation_scale=10,
+        elevation_scale=elev_scale,
+        opacity=0.9,
+        coverage=0.95,
         extruded=bool(show_3d),
         pickable=True,
+        get_line_color=[60, 60, 60],
+        line_width_min_pixels=1,
     )
 
     tooltip = {
@@ -370,3 +354,55 @@ def create_hex_density_map(
 
     deck = pdk.Deck(layers=[layer], initial_view_state=view_state, map_style='carto-positron', tooltip=tooltip)
     return deck
+
+
+def create_deck_heatmap(
+    df: pd.DataFrame,
+    *,
+    radius_pixels: int = 60,
+    intensity: float = 1.0,
+):
+    """Full-resolution heatmap using pydeck's HeatmapLayer.
+
+    Optimized for large datasets; renders all points without server-side sampling.
+    Returns pydeck.Deck or None if dependencies missing.
+    """
+    try:
+        import pydeck as pdk  # type: ignore
+    except Exception:
+        return None
+
+    coords_series = df.get('incident_district', pd.Series(dtype=object)).map(DISTRICT_COORDINATES)
+    if coords_series is None or coords_series.empty:
+        return None
+
+    lat = coords_series.apply(lambda v: float(v[0]) if isinstance(v, (list, tuple)) else float('nan'))
+    lon = coords_series.apply(lambda v: float(v[1]) if isinstance(v, (list, tuple)) else float('nan'))
+    points = pd.DataFrame({'lat': lat, 'lon': lon}).dropna()
+    if points.empty:
+        return None
+
+    layer = pdk.Layer(
+        'HeatmapLayer',
+        data=points,
+        get_position='[lon, lat]',
+        aggregation='SUM',
+        radius_pixels=radius_pixels,
+        intensity=intensity,
+        color_range=[
+            [255, 255, 204],
+            [255, 237, 160],
+            [254, 217, 118],
+            [254, 178, 76],
+            [253, 141, 60],
+            [240, 59, 32],
+        ],
+    )
+
+    view_state = pdk.ViewState(
+        latitude=float(DEFAULT_MAP_CENTER[0]),
+        longitude=float(DEFAULT_MAP_CENTER[1]),
+        zoom=float(DEFAULT_MAP_ZOOM),
+    )
+
+    return pdk.Deck(layers=[layer], initial_view_state=view_state, map_style='carto-positron')

@@ -17,6 +17,7 @@ from visualization.map_view import (
     create_heatmap,
     create_time_animation_map,
     create_hex_density_map,
+    create_deck_heatmap,
 )
 from visualization.charts import create_statistics_charts
 from analytics.data_qa import DataQABot
@@ -218,18 +219,19 @@ def page_maps():
             st.markdown("透過熱力圖快速掌握案件密度，並利用標記瀏覽案件細節。")
             map_mode = st.radio(
                 "地圖模式",
-                ["Folium 熱力圖", "Hex 聚合地圖 (pydeck)"],
-                horizontal=True,
+                ["Folium 熱力圖", "Hex 聚合地圖 (pydeck)", "Pydeck 熱力圖 (全量)"]
+                ,horizontal=True,
             )
 
             if map_mode == "Folium 熱力圖":
                 with st.spinner("生成熱力圖..."):
-                    heatmap = create_heatmap(df, filters)
+                    # Folium 端預設啟用採樣；若要完整 42 萬點可將 max_heatmap_points=None
+                    heatmap = create_heatmap(df, filters, max_heatmap_points=None if st.checkbox("不採樣 (可能較慢)") else None)
                     st_folium(heatmap, width=None, height=520, returned_objects=[])
                 st.caption(
                     "大量資料時將自動採樣熱力圖，並關閉部分標記以避免瀏覽器過載。"
                 )
-            else:
+            elif map_mode == "Hex 聚合地圖 (pydeck)":
                 with st.spinner("生成 Hex 聚合地圖..."):
                     deck = create_hex_density_map(df, resolution=8, show_3d=True)
                     if deck is None:
@@ -239,6 +241,14 @@ def page_maps():
                     else:
                         st.pydeck_chart(deck, use_container_width=True, height=520)
                 st.caption("Hex 聚合能夠在 40–50 萬筆資料下保持流暢互動。")
+            else:
+                with st.spinner("生成 Pydeck 熱力圖 (全量)..."):
+                    deck = create_deck_heatmap(df, radius_pixels=60, intensity=1.0)
+                    if deck is None:
+                        st.warning("缺少依賴：請安裝 pydeck 後再試 (`poetry add pydeck`) ")
+                    else:
+                        st.pydeck_chart(deck, use_container_width=True, height=520)
+                st.caption("此模式會傳送所有點位，適合強機或生產部署環境。")
         
         with tab_animation:
             st.markdown("時間序列動畫呈現案件發生的累積趨勢與時空分布。")

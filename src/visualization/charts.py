@@ -62,12 +62,17 @@ def create_statistics_charts(df: pd.DataFrame) -> Dict[str, go.Figure]:
     
     # 3. Response Time Distribution (Histogram)
     if 'response_time_seconds' in df.columns:
-        response_data = df[df['response_time_seconds'].notna()]['response_time_seconds'] / 60  # Convert to minutes
-        
-        if len(response_data) > 0:
+        # Convert to minutes and clip negatives to 0; drop extreme outliers for readability
+        response_series = df['response_time_seconds'].dropna() / 60.0
+        if len(response_series) > 0:
+            response_series = response_series.clip(lower=0)
+            # Compute a reasonable upper bound (e.g., 99th percentile)
+            ub = float(response_series.quantile(0.99)) if len(response_series) > 5 else float(response_series.max())
+            # Avoid degenerate range
+            ub = max(ub, 1.0)
             fig_response = px.histogram(
-                response_data,
-                nbins=30,
+                response_series,
+                nbins=40,
                 title='反應時間分布',
                 labels={'value': '反應時間 (分鐘)', 'count': '案件數'},
                 color_discrete_sequence=['#636EFA']
@@ -76,7 +81,8 @@ def create_statistics_charts(df: pd.DataFrame) -> Dict[str, go.Figure]:
                 xaxis_title='反應時間 (分鐘)',
                 yaxis_title='案件數',
                 height=400,
-                showlegend=False
+                showlegend=False,
+                xaxis_range=[0, ub]
             )
             charts['response_histogram'] = fig_response
     
@@ -198,4 +204,3 @@ def create_custom_chart(df: pd.DataFrame, chart_type: str, x_col: str, y_col: st
         raise ValueError(f"Unsupported chart type: {chart_type}")
     
     return fig
-
