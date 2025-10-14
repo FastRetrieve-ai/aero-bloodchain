@@ -7,7 +7,7 @@ from folium.plugins import HeatMap, MarkerCluster, MiniMap, Fullscreen
 import plotly.express as px
 import plotly.graph_objects as go
 from typing import Dict, Any, Optional
-import random
+import math
 
 from config import DEFAULT_MAP_CENTER, DEFAULT_MAP_ZOOM
 
@@ -43,12 +43,6 @@ DISTRICT_COORDINATES = {
     '烏來區': [24.8656, 121.5498],
 }
 
-# Performance guardrails
-# Limit the number of markers (popups are heavy) and
-# sample heatmap points to keep payload under Streamlit limits
-MAX_MARKERS: int = 5000
-HEATMAP_SAMPLE: int = 150000
-RANDOM_SEED: int = 42
 
 
 def geocode_address(address: str) -> tuple:
@@ -80,7 +74,7 @@ def create_heatmap(
     df: pd.DataFrame,
     filters: Optional[Dict[str, Any]] = None,
     *,
-    max_heatmap_points: Optional[int] = HEATMAP_SAMPLE,
+    max_heatmap_points: Optional[int] = None,
 ) -> folium.Map:
     """
     Create an interactive heatmap with markers
@@ -92,6 +86,8 @@ def create_heatmap(
     Returns:
         folium.Map object
     """
+    # Parameter retained for backward compatibility (aggregation removes need for sampling)
+    _ = max_heatmap_points
     # Apply filters if provided
     if filters:
         if 'start_date' in filters and 'date' in df.columns:
@@ -135,70 +131,76 @@ def create_heatmap(
     MiniMap(toggle_display=True).add_to(m)
     Fullscreen(position='topleft').add_to(m)
     
-    # Prepare location data
-    locations: list[list[float]] = []
-    marker_data: list[Dict[str, Any]] = []
-    
-    random.seed(RANDOM_SEED)
-    for idx, row in df.iterrows():
-        # Try to get coordinates
-        coords = None
-        
-        # First try from district
-        district = row.get('incident_district')
-        if district and district in DISTRICT_COORDINATES:
-            coords = DISTRICT_COORDINATES[district]
-        else:
-            # Try geocoding actual address
-            address = row.get('actual_address') or row.get('case_address')
-            coords = geocode_address(address)
-        
-        if coords:
-            # Append coordinates for heatmap (full set; will sample below)
-            locations.append([float(coords[0]), float(coords[1])])
+    # Prepare aggregated statistics by district to minimize payload
+    if 'incident_district' not in df.columns:
+        folium.LayerControl(collapsed=False).add_to(m)
+        return m
 
-            # Only accumulate marker info up to MAX_MARKERS
-            if len(marker_data) < MAX_MARKERS:
-                marker_data.append({
-                    'coords': [float(coords[0]), float(coords[1])],
-                    'case_number': row.get('case_number', 'N/A'),
-                    'date': str(row.get('date', 'N/A')),
-                    'dispatch_reason': row.get('dispatch_reason', 'N/A'),
-                    'district': row.get('incident_district', 'N/A'),
-                    'triage_level': row.get('triage_level', 'N/A'),
-                    'hospital': row.get('destination_hospital', 'N/A'),
-                    'critical': bool(row.get('critical_case', False))
-                })
-    
-    # Add heatmap layer
-    if locations:
-        # Sample heatmap points to cap payload size (unless None)
-        if max_heatmap_points is not None and len(locations) > max_heatmap_points:
-            locations = random.sample(locations, max_heatmap_points)
+    # Only consider districts with known coordinates
+    df_geo = df[df['incident_district'].isin(DISTRICT_COORDINATES)].copy()
+    if df_geo.empty:
+        folium.LayerControl(collapsed=False).add_to(m)
+        return m
 
+    agg_df = df_geo.groupby('incident_district').agg(
+        count=('incident_district', 'size'),
+        critical_count=('critical_case', lambda s: int(pd.Series(s).fillna(False).astype(int).sum()) if s is not None else 0),
+        avg_response=('response_time_seconds', 'mean'),
+    ).reset_index()
+
+    agg_df['lat'] = agg_df['incident_district'].map(lambda d: DISTRICT_COORDINATES[d][0])
+    agg_df['lon'] = agg_df['incident_district'].map(lambda d: DISTRICT_COORDINATES[d][1])
+    agg_df['critical_ratio'] = agg_df.apply(
+        lambda row: (row['critical_count'] / row['count']) if row['count'] else 0.0,
+        axis=1
+    )
+    agg_df['avg_response_min'] = agg_df['avg_response'].apply(lambda v: (v / 60.0) if pd.notna(v) else None)
+
+    # Heatmap data uses weight per district instead of every case
+    heat_data = agg_df[['lat', 'lon', 'count']].values.tolist()
+    if heat_data:
         HeatMap(
-            locations,
-            radius=18,
+            heat_data,
+            radius=35,
             blur=28,
             max_zoom=13,
-            gradient={0.4: '#74add1', 0.6: '#fdae61', 0.8: '#f46d43', 1.0: '#d73027'}
+            gradient={0.3: '#74add1', 0.6: '#fdae61', 0.8: '#f46d43', 1.0: '#d73027'}
         ).add_to(m)
 
-        # Add marker cluster only when under threshold
-        if marker_data:
-            marker_cluster = MarkerCluster(name="案件標記").add_to(m)
+        # Add one marker per district summarizing key metrics
+        max_count = agg_df['count'].max()
+        for _, row in agg_df.iterrows():
+            popup_html = """
+            <div style=\"width: 260px;\">
+                <h4 style=\"margin-bottom:6px;\">{district}</h4>
+                <table style=\"width:100%;font-size:13px;\">
+                    <tr><td><b>案件數：</b></td><td>{count:,}</td></tr>
+                    <tr><td><b>危急案件比：</b></td><td>{critical_ratio:.1%}</td></tr>
+                    <tr><td><b>平均反應時間：</b></td><td>{avg_response}</td></tr>
+                </table>
+            </div>
+            """
+            avg_response_disp = f"{row['avg_response_min']:.1f} 分" if row['avg_response_min'] is not None else "—"
+            popup_html = popup_html.format(
+                district=row['incident_district'],
+                count=int(row['count']),
+                critical_ratio=row['critical_ratio'],
+                avg_response=avg_response_disp,
+            )
 
-            for data in marker_data:
-                icon_color = 'red' if data['critical'] else 'blue'
-                popup_html = f"""
-                <div style=\"width: 260px;\">\n                    <h4 style=\"margin-bottom:6px;\">案件 {data['case_number']}</h4>\n                    <table style=\"width:100%;font-size:13px;\">\n                        <tr><td><b>日期：</b></td><td>{data['date']}</td></tr>\n                        <tr><td><b>派遣原因：</b></td><td>{data['dispatch_reason']}</td></tr>\n                        <tr><td><b>行政區：</b></td><td>{data['district']}</td></tr>\n                        <tr><td><b>檢傷分級：</b></td><td>{data['triage_level']}</td></tr>\n                        <tr><td><b>後送醫院：</b></td><td>{data['hospital']}</td></tr>\n                        <tr><td><b>危急個案：</b></td><td>{'是' if data['critical'] else '否'}</td></tr>\n                    </table>\n                </div>
-                """
+            # Scale circle radius by square root to avoid huge values
+            radius = 8 + 20 * math.sqrt(row['count'] / max_count) if max_count else 10
 
-                folium.Marker(
-                    location=data['coords'],
-                    popup=folium.Popup(popup_html, max_width=320),
-                    icon=folium.Icon(color=icon_color, icon='ambulance', prefix='fa')
-                ).add_to(marker_cluster)
+            folium.CircleMarker(
+                location=[row['lat'], row['lon']],
+                radius=radius,
+                color='#2b8cbe',
+                fill=True,
+                fill_color='#2b8cbe',
+                fill_opacity=0.65,
+                tooltip=f"{row['incident_district']}：{int(row['count']):,} 件",
+                popup=folium.Popup(popup_html, max_width=320),
+            ).add_to(m)
 
     folium.LayerControl(collapsed=False).add_to(m)
     return m

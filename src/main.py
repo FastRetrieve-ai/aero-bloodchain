@@ -225,17 +225,9 @@ def page_maps():
 
             if map_mode == "Folium 熱力圖":
                 with st.spinner("生成熱力圖..."):
-                    # Folium 端預設啟用採樣；勾選可改為全量
-                    no_sample = st.checkbox("不採樣 (可能較慢)")
-                    heatmap = create_heatmap(
-                        df,
-                        filters,
-                        max_heatmap_points=None if no_sample else 150000,
-                    )
+                    heatmap = create_heatmap(df, filters)
                     st_folium(heatmap, width=None, height=520, returned_objects=[])
-                st.caption(
-                    "大量資料時將自動採樣熱力圖，並關閉部分標記以避免瀏覽器過載。"
-                )
+                st.caption(" Folium 熱力圖已改為依行政區聚合，避免大量資料傳輸。")
             elif map_mode == "Hex 聚合地圖 (pydeck)":
                 with st.spinner("生成 Hex 聚合地圖..."):
                     deck = create_hex_density_map(df, resolution=8, show_3d=True)
@@ -267,13 +259,13 @@ def page_maps():
                 charts = create_statistics_charts(df)
                 
                 chart_order = [
-                    "district_bar",
                     "time_line",
-                    "triage_pie",
+                    "critical_trend",
                     "response_histogram",
                     "transport_histogram",
+                    "triage_pie",
                     "reason_bar",
-                    "critical_trend",
+                    "district_bar",
                     "hospital_bar",
                 ]
                 available_charts = [key for key in chart_order if key in charts]
