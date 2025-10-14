@@ -62,29 +62,60 @@ def create_statistics_charts(df: pd.DataFrame) -> Dict[str, go.Figure]:
     
     # 3. Response Time Distribution (Histogram)
     if 'response_time_seconds' in df.columns:
-        # Convert to minutes and clip negatives to 0; drop extreme outliers for readability
-        response_series = df['response_time_seconds'].dropna() / 60.0
+        # Convert to minutes; clip negatives to 0; limit extreme outliers
+        response_series = (df['response_time_seconds'].astype('float64') / 60.0).dropna()
+        response_series = response_series.clip(lower=0)
         if len(response_series) > 0:
-            response_series = response_series.clip(lower=0)
-            # Compute a reasonable upper bound (e.g., 99th percentile)
-            ub = float(response_series.quantile(0.99)) if len(response_series) > 5 else float(response_series.max())
-            # Avoid degenerate range
+            ub = float(response_series.quantile(0.99)) if len(response_series) > 50 else float(response_series.max())
             ub = max(ub, 1.0)
-            fig_response = px.histogram(
-                response_series,
-                nbins=40,
-                title='反應時間分布',
-                labels={'value': '反應時間 (分鐘)', 'count': '案件數'},
-                color_discrete_sequence=['#636EFA']
-            )
+            # Use go.Histogram with explicit bin size to avoid plotly auto-binning artifacts
+            import plotly.graph_objects as go
+            target_bins = 60
+            bin_size = max(ub / target_bins, 0.5)  # at least 0.5 minute per bin
+            fig_response = go.Figure(data=[
+                go.Histogram(
+                    x=response_series,
+                    xbins=dict(start=0, end=ub, size=bin_size),
+                    marker_color='#636EFA',
+                    hovertemplate='範圍 %{xbins.start}–%{xbins.end}<br>案件數 %{y}<extra></extra>'
+                )
+            ])
             fig_response.update_layout(
+                title='反應時間分布',
                 xaxis_title='反應時間 (分鐘)',
                 yaxis_title='案件數',
                 height=400,
-                showlegend=False,
+                bargap=0.05,
                 xaxis_range=[0, ub]
             )
             charts['response_histogram'] = fig_response
+
+    # 3b. Transport Time Distribution (送醫時間)
+    if 'transport_time_seconds' in df.columns:
+        transport_series = (df['transport_time_seconds'].astype('float64') / 60.0).dropna()
+        transport_series = transport_series.clip(lower=0)
+        if len(transport_series) > 0:
+            ub_t = float(transport_series.quantile(0.99)) if len(transport_series) > 50 else float(transport_series.max())
+            ub_t = max(ub_t, 1.0)
+            target_bins = 60
+            bin_size_t = max(ub_t / target_bins, 1.0)
+            fig_transport = go.Figure(data=[
+                go.Histogram(
+                    x=transport_series,
+                    xbins=dict(start=0, end=ub_t, size=bin_size_t),
+                    marker_color='#EF553B',
+                    hovertemplate='範圍 %{xbins.start}–%{xbins.end}<br>案件數 %{y}<extra></extra>'
+                )
+            ])
+            fig_transport.update_layout(
+                title='送醫時間分布',
+                xaxis_title='送醫時間 (分鐘)',
+                yaxis_title='案件數',
+                height=400,
+                bargap=0.05,
+                xaxis_range=[0, ub_t]
+            )
+            charts['transport_histogram'] = fig_transport
     
     # 4. Triage Level Distribution (Pie Chart)
     if 'triage_level' in df.columns:

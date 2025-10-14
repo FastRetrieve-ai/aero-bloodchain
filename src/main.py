@@ -266,7 +266,16 @@ def page_maps():
             with st.spinner("生成統計圖表..."):
                 charts = create_statistics_charts(df)
                 
-                chart_order = ["district_bar", "time_line", "triage_pie", "response_histogram", "reason_bar", "critical_trend", "hospital_bar"]
+                chart_order = [
+                    "district_bar",
+                    "time_line",
+                    "triage_pie",
+                    "response_histogram",
+                    "transport_histogram",
+                    "reason_bar",
+                    "critical_trend",
+                    "hospital_bar",
+                ]
                 available_charts = [key for key in chart_order if key in charts]
                 
                 if not available_charts:
