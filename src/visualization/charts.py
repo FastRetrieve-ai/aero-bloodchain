@@ -6,6 +6,76 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from typing import Dict, Any
+import numpy as np
+
+
+def _build_histogram(
+    values: pd.Series,
+    *,
+    title: str,
+    x_label: str,
+    color: str,
+    min_bin_size: float,
+    target_bins: int = 60,
+) -> go.Figure | None:
+    """Helper to create histogram with explicit bins and custom hover."""
+    if values is None or values.empty:
+        return None
+
+    cleaned = values.astype("float64").replace([np.inf, -np.inf], np.nan).dropna()
+    cleaned = cleaned[cleaned >= 0]
+    if cleaned.empty:
+        return None
+
+    # Determine upper bound using 99th percentile to ignore outliers
+    if len(cleaned) > 50:
+        upper_bound = float(cleaned.quantile(0.99))
+    else:
+        upper_bound = float(cleaned.max())
+    upper_bound = max(upper_bound, min_bin_size)
+
+    # Compute bin size and edges
+    bin_size = max(upper_bound / target_bins, min_bin_size)
+    max_edge = np.ceil(upper_bound / bin_size) * bin_size
+    edges = np.arange(0, max_edge + bin_size, bin_size)
+    if len(edges) < 2:
+        edges = np.array([0.0, bin_size])
+
+    counts, edges = np.histogram(cleaned, bins=edges)
+    if not counts.any():
+        return None
+
+    centers = edges[:-1] + np.diff(edges) / 2
+    widths = np.diff(edges)
+    custom = np.stack([edges[:-1], edges[1:]], axis=-1)
+
+    fig = go.Figure(
+        data=[
+            go.Bar(
+                x=centers,
+                y=counts,
+                width=widths * 0.9,
+                marker_color=color,
+                customdata=custom,
+                hovertemplate=(
+                    "範圍 %{customdata[0]:.1f}–%{customdata[1]:.1f} 分鐘"  # bin range
+                    "<br>案件數 %{y:,}"  # formatted count
+                    "<extra></extra>"
+                ),
+            )
+        ]
+    )
+
+    fig.update_layout(
+        title=title,
+        xaxis_title=x_label,
+        yaxis_title="案件數",
+        height=400,
+        bargap=0.05,
+    )
+    fig.update_xaxes(range=[0, edges[-1]])
+
+    return fig
 
 
 def create_statistics_charts(df: pd.DataFrame) -> Dict[str, go.Figure]:
@@ -62,23 +132,29 @@ def create_statistics_charts(df: pd.DataFrame) -> Dict[str, go.Figure]:
     
     # 3. Response Time Distribution (Histogram)
     if 'response_time_seconds' in df.columns:
-        response_data = df[df['response_time_seconds'].notna()]['response_time_seconds'] / 60  # Convert to minutes
-        
-        if len(response_data) > 0:
-            fig_response = px.histogram(
-                response_data,
-                nbins=30,
-                title='反應時間分布',
-                labels={'value': '反應時間 (分鐘)', 'count': '案件數'},
-                color_discrete_sequence=['#636EFA']
-            )
-            fig_response.update_layout(
-                xaxis_title='反應時間 (分鐘)',
-                yaxis_title='案件數',
-                height=400,
-                showlegend=False
-            )
+        response_series = df['response_time_seconds'] / 60.0
+        fig_response = _build_histogram(
+            response_series,
+            title='反應時間分布',
+            x_label='反應時間 (分鐘)',
+            color='#636EFA',
+            min_bin_size=0.5,
+        )
+        if fig_response:
             charts['response_histogram'] = fig_response
+
+    # 3b. Transport Time Distribution (送醫時間)
+    if 'transport_time_seconds' in df.columns:
+        transport_series = df['transport_time_seconds'] / 60.0
+        fig_transport = _build_histogram(
+            transport_series,
+            title='送醫時間分布',
+            x_label='送醫時間 (分鐘)',
+            color='#EF553B',
+            min_bin_size=1.0,
+        )
+        if fig_transport:
+            charts['transport_histogram'] = fig_transport
     
     # 4. Triage Level Distribution (Pie Chart)
     if 'triage_level' in df.columns:
@@ -198,4 +274,3 @@ def create_custom_chart(df: pd.DataFrame, chart_type: str, x_col: str, y_col: st
         raise ValueError(f"Unsupported chart type: {chart_type}")
     
     return fig
-

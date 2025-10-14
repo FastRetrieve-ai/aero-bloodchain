@@ -148,6 +148,11 @@ poetry run streamlit run src/main.py --server.port 80 --server.address 0.0.0.0
 - MarkerCluster 展示個別案件詳情
 - Plotly 實現時間序列動畫
 
+**大數據最佳化（新）**：
+
+- Folium 熱力圖：自動對輸入座標採樣（上限 150k 點），並將單點標記限制在 5k 筆以避免超過 Streamlit 傳輸上限與瀏覽器卡頓。
+- Hex 聚合地圖：新增 pydeck + H3 的六角格網密度圖，將 40–50 萬筆點位聚合為幾千個格網後再渲染，互動更順暢。可於地圖分頁以「地圖模式」切換。
+
 **功能特色**：
 
 - **熱力圖與標記**：顯示案件分布密度，點擊標記查看詳情
