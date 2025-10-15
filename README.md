@@ -13,6 +13,8 @@
 3. **📊 數據分析問答** - 使用自然語言查詢急救案件數據，自動產生圖表
 4. **📄 行政表單產生器** - 快速產生 PDF/Excel 格式的行政文書（骨架實作）
 
+> 新增：可透過環境變數設定簡易帳號密碼登入，保護 Streamlit 介面。
+
 ## 技術架構
 
 - **前端框架**: Streamlit
@@ -70,6 +72,9 @@ OPENAI_API_KEY=your_openai_api_key_here
 OPENAI_MODEL=gpt-4o-mini
 # 可選：數據分析問答專用模型，未設定時沿用 OPENAI_MODEL
 SQL_QA_MODEL=
+# 可選：啟用簡易登入保護（兩者皆需設定）
+APP_LOGIN_USERNAME=
+APP_LOGIN_PASSWORD=
 ```
 
 或者，使用 Streamlit secrets (推薦用於生產環境)：
@@ -82,6 +87,9 @@ mkdir -p .streamlit
 
 ```toml
 OPENAI_API_KEY = "your_openai_api_key_here"
+# Optional login guard
+# APP_LOGIN_USERNAME = "admin"
+# APP_LOGIN_PASSWORD = "changeme"
 ```
 
 ### 5. 載入數據到資料庫
@@ -148,10 +156,11 @@ poetry run streamlit run src/main.py --server.port 80 --server.address 0.0.0.0
 - MarkerCluster 展示個別案件詳情
 - Plotly 實現時間序列動畫
 
-**大數據最佳化（新）**：
+**效能優化重點**：
 
-- Folium 熱力圖：自動對輸入座標採樣（上限 150k 點），並將單點標記限制在 5k 筆以避免超過 Streamlit 傳輸上限與瀏覽器卡頓。
-- Hex 聚合地圖：新增 pydeck + H3 的六角格網密度圖，將 40–50 萬筆點位聚合為幾千個格網後再渲染，互動更順暢。可於地圖分頁以「地圖模式」切換。
+- Folium 熱力圖改以行政區聚合統計，直接從 SQL 取得彙總資料，避免一次載入全量點位。
+- Hex 聚合地圖維持 pydeck + H3 作為大量資料選項，可於地圖分頁的「地圖模式」切換使用。
+- 統計圖表與動畫改為即時查詢資料庫，只抓取繪圖所需欄位，減少記憶體占用。
 
 **功能特色**：
 
@@ -162,7 +171,7 @@ poetry run streamlit run src/main.py --server.port 80 --server.address 0.0.0.0
 **篩選條件**：
 
 - 日期範圍
-- 行政區（單選）
+- 行政區（多選，預設為「全部」）
 - 派遣原因（多選）
 - 檢傷分級（多選）
 - 僅顯示危急個案

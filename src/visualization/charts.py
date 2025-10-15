@@ -4,9 +4,10 @@ Statistical charts for emergency case data
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-from typing import Dict, Any
+from typing import Dict, Optional
 import numpy as np
+
+from database.db_manager import DatabaseManager
 
 
 def _build_histogram(
@@ -78,61 +79,94 @@ def _build_histogram(
     return fig
 
 
-def create_statistics_charts(df: pd.DataFrame) -> Dict[str, go.Figure]:
+def create_statistics_charts(
+    db_manager: DatabaseManager,
+    *,
+    filters: Optional[Dict[str, object]] = None,
+    district_summary: Optional[pd.DataFrame] = None,
+) -> Dict[str, go.Figure]:
     """
-    Create various statistical charts
-    
+    Create various statistical charts by querying the database on demand.
+
+    Args:
+        db_manager: Database access layer.
+        filters: Optional filter dictionary shared with the map view.
+        district_summary: Optional pre-computed district aggregation to avoid
+            duplicate queries.
+
     Returns:
-        Dictionary of chart names to plotly Figure objects
+        Dictionary mapping chart keys to Plotly Figure objects.
     """
-    charts = {}
-    
+    charts: Dict[str, go.Figure] = {}
+
     # 1. Cases by District (Bar Chart)
-    if 'incident_district' in df.columns:
-        district_counts = df['incident_district'].value_counts().reset_index()
-        district_counts.columns = ['行政區', '案件數']
-        
+    district_df = district_summary
+    if district_df is None:
+        district_df = db_manager.get_district_aggregates(filters)
+    if district_df is not None and not district_df.empty:
+        district_chart = (
+            district_df[['incident_district', 'case_count']]
+            .sort_values('case_count', ascending=False)
+            .head(15)
+            .rename(columns={'incident_district': '行政區', 'case_count': '案件數'})
+        )
         fig_district = px.bar(
-            district_counts.head(15),
+            district_chart,
             x='行政區',
             y='案件數',
             title='各行政區急救案件數量',
             labels={'行政區': '行政區', '案件數': '案件數'},
             color='案件數',
-            color_continuous_scale='Reds'
+            color_continuous_scale='Reds',
         )
-        fig_district.update_layout(
-            xaxis_tickangle=-45,
-            height=400
-        )
+        fig_district.update_layout(xaxis_tickangle=-45, height=400)
         charts['district_bar'] = fig_district
-    
+
+    # Helper to safely extract hour component
+    def _extract_hour(raw: object) -> Optional[int]:
+        if pd.isna(raw):
+            return None
+        text = str(raw)
+        if not text:
+            return None
+        hour_text = text.split(':', 1)[0]
+        try:
+            hour_value = int(hour_text)
+        except ValueError:
+            return None
+        return hour_value if 0 <= hour_value <= 23 else None
+
     # 2. Cases by Time of Day (Line Chart)
-    if 'dispatch_time' in df.columns:
-        # Extract hour from dispatch time
-        df_time = df.copy()
-        df_time['hour'] = df_time['dispatch_time'].apply(
-            lambda x: int(str(x).split(':')[0]) if pd.notna(x) and ':' in str(x) else None
-        )
-        
-        if df_time['hour'].notna().any():
-            hour_counts = df_time['hour'].value_counts().sort_index().reset_index()
+    dispatch_df = db_manager.get_cases_dataframe(
+        filters, columns=['dispatch_time']
+    )
+    if not dispatch_df.empty and 'dispatch_time' in dispatch_df.columns:
+        hours = dispatch_df['dispatch_time'].apply(_extract_hour).dropna()
+        if not hours.empty:
+            hour_counts = (
+                hours.astype(int)
+                .value_counts()
+                .sort_index()
+                .reset_index()
+            )
             hour_counts.columns = ['小時', '案件數']
-            
             fig_time = px.line(
                 hour_counts,
                 x='小時',
                 y='案件數',
                 title='24小時急救案件分布',
                 labels={'小時': '時段 (小時)', '案件數': '案件數'},
-                markers=True
+                markers=True,
             )
             fig_time.update_layout(height=400)
             charts['time_line'] = fig_time
-    
+
     # 3. Response Time Distribution (Histogram)
-    if 'response_time_seconds' in df.columns:
-        response_series = df['response_time_seconds'] / 60.0
+    response_df = db_manager.get_cases_dataframe(
+        filters, columns=['response_time_seconds']
+    )
+    if 'response_time_seconds' in response_df.columns:
+        response_series = response_df['response_time_seconds'] / 60.0
         fig_response = _build_histogram(
             response_series,
             title='反應時間分布',
@@ -144,8 +178,11 @@ def create_statistics_charts(df: pd.DataFrame) -> Dict[str, go.Figure]:
             charts['response_histogram'] = fig_response
 
     # 3b. Transport Time Distribution (送醫時間)
-    if 'transport_time_seconds' in df.columns:
-        transport_series = df['transport_time_seconds'] / 60.0
+    transport_df = db_manager.get_cases_dataframe(
+        filters, columns=['transport_time_seconds']
+    )
+    if 'transport_time_seconds' in transport_df.columns:
+        transport_series = transport_df['transport_time_seconds'] / 60.0
         fig_transport = _build_histogram(
             transport_series,
             title='送醫時間分布',
@@ -155,83 +192,101 @@ def create_statistics_charts(df: pd.DataFrame) -> Dict[str, go.Figure]:
         )
         if fig_transport:
             charts['transport_histogram'] = fig_transport
-    
+
     # 4. Triage Level Distribution (Pie Chart)
-    if 'triage_level' in df.columns:
-        triage_counts = df['triage_level'].value_counts().reset_index()
-        triage_counts.columns = ['檢傷分級', '案件數']
-        
-        fig_triage = px.pie(
-            triage_counts,
-            values='案件數',
-            names='檢傷分級',
-            title='檢傷分級分布',
-            color_discrete_sequence=px.colors.qualitative.Set3
+    triage_df = db_manager.get_counts_by_field(
+        'triage_level', filters=filters
+    )
+    if not triage_df.empty and 'triage_level' in triage_df.columns:
+        triage_chart = (
+            triage_df.dropna(subset=['triage_level'])
+            .loc[lambda df_: df_['triage_level'] != ""]
+            .rename(columns={'triage_level': '檢傷分級', 'case_count': '案件數'})
         )
-        fig_triage.update_traces(textposition='inside', textinfo='percent+label')
-        fig_triage.update_layout(height=400)
-        charts['triage_pie'] = fig_triage
-    
+        if not triage_chart.empty:
+            fig_triage = px.pie(
+                triage_chart,
+                values='案件數',
+                names='檢傷分級',
+                title='檢傷分級分布',
+                color_discrete_sequence=px.colors.qualitative.Set3,
+            )
+            fig_triage.update_traces(textposition='inside', textinfo='percent+label')
+            fig_triage.update_layout(height=400)
+            charts['triage_pie'] = fig_triage
+
     # 5. Dispatch Reason Distribution (Bar Chart)
-    if 'dispatch_reason' in df.columns:
-        reason_counts = df['dispatch_reason'].value_counts().head(10).reset_index()
-        reason_counts.columns = ['派遣原因', '案件數']
-        
-        fig_reason = px.bar(
-            reason_counts,
-            y='派遣原因',
-            x='案件數',
-            orientation='h',
-            title='派遣原因統計（前10）',
-            labels={'派遣原因': '派遣原因', '案件數': '案件數'},
-            color='案件數',
-            color_continuous_scale='Blues'
+    reason_df = db_manager.get_counts_by_field(
+        'dispatch_reason', filters=filters, limit=10
+    )
+    if not reason_df.empty and 'dispatch_reason' in reason_df.columns:
+        reason_chart = (
+            reason_df.dropna(subset=['dispatch_reason'])
+            .loc[lambda df_: df_['dispatch_reason'] != ""]
+            .rename(columns={'dispatch_reason': '派遣原因', 'case_count': '案件數'})
         )
-        fig_reason.update_layout(height=450)
-        charts['reason_bar'] = fig_reason
-    
+        if not reason_chart.empty:
+            fig_reason = px.bar(
+                reason_chart,
+                y='派遣原因',
+                x='案件數',
+                orientation='h',
+                title='派遣原因統計（前10）',
+                labels={'派遣原因': '派遣原因', '案件數': '案件數'},
+                color='案件數',
+                color_continuous_scale='Blues',
+            )
+            fig_reason.update_layout(height=450)
+            charts['reason_bar'] = fig_reason
+
     # 6. Critical Cases Trend (Line Chart over time)
-    if 'date' in df.columns and 'critical_case' in df.columns:
-        df_critical = df.copy()
-        df_critical['date'] = pd.to_datetime(df_critical['date'], errors='coerce')
-        df_critical = df_critical[df_critical['date'].notna()]
-        
-        if len(df_critical) > 0:
-            df_critical['date_only'] = df_critical['date'].dt.date
-            daily_critical = df_critical.groupby('date_only')['critical_case'].sum().reset_index()
-            daily_critical.columns = ['日期', '危急案件數']
-            
+    critical_df = db_manager.get_daily_critical_counts(filters)
+    if not critical_df.empty and 'critical_count' in critical_df.columns:
+        critical_df['date'] = pd.to_datetime(
+            critical_df['date'], errors='coerce'
+        )
+        critical_chart = (
+            critical_df[critical_df['date'].notna()]
+            .sort_values('date')
+            .assign(日期=lambda df_: df_['date'].dt.date,
+                    危急案件數=lambda df_: df_['critical_count'].astype(int))
+            [['日期', '危急案件數']]
+        )
+        if not critical_chart.empty:
             fig_critical = px.line(
-                daily_critical,
+                critical_chart,
                 x='日期',
                 y='危急案件數',
                 title='危急案件時間趨勢',
                 labels={'日期': '日期', '危急案件數': '危急案件數'},
-                markers=True
+                markers=True,
             )
             fig_critical.update_layout(height=400)
             charts['critical_trend'] = fig_critical
-    
+
     # 7. Hospital Distribution (Bar Chart)
-    if 'destination_hospital' in df.columns:
-        hospital_counts = df['destination_hospital'].value_counts().head(10).reset_index()
-        hospital_counts.columns = ['醫院', '案件數']
-        
-        fig_hospital = px.bar(
-            hospital_counts,
-            x='醫院',
-            y='案件數',
-            title='後送醫院統計（前10）',
-            labels={'醫院': '醫院', '案件數': '案件數'},
-            color='案件數',
-            color_continuous_scale='Greens'
+    hospital_df = db_manager.get_counts_by_field(
+        'destination_hospital', filters=filters, limit=10
+    )
+    if not hospital_df.empty and 'destination_hospital' in hospital_df.columns:
+        hospital_chart = (
+            hospital_df.dropna(subset=['destination_hospital'])
+            .loc[lambda df_: df_['destination_hospital'] != ""]
+            .rename(columns={'destination_hospital': '醫院', 'case_count': '案件數'})
         )
-        fig_hospital.update_layout(
-            xaxis_tickangle=-45,
-            height=400
-        )
-        charts['hospital_bar'] = fig_hospital
-    
+        if not hospital_chart.empty:
+            fig_hospital = px.bar(
+                hospital_chart,
+                x='醫院',
+                y='案件數',
+                title='後送醫院統計（前10）',
+                labels={'醫院': '醫院', '案件數': '案件數'},
+                color='案件數',
+                color_continuous_scale='Greens',
+            )
+            fig_hospital.update_layout(xaxis_tickangle=-45, height=400)
+            charts['hospital_bar'] = fig_hospital
+
     return charts
 
 

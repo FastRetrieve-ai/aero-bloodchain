@@ -10,7 +10,13 @@ from datetime import datetime
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from config import APP_TITLE, APP_SUBTITLE, OPENAI_API_KEY
+from config import (
+    APP_TITLE,
+    APP_SUBTITLE,
+    OPENAI_API_KEY,
+    APP_LOGIN_USERNAME,
+    APP_LOGIN_PASSWORD,
+)
 from database.db_manager import DatabaseManager
 from qa_bot.manual_qa import ManualQABot
 from visualization.map_view import (
@@ -131,6 +137,43 @@ def page_manual_qa():
         st.rerun()
 
 
+def ensure_authenticated() -> None:
+    """Enforce simple username/password authentication when configured."""
+    if not APP_LOGIN_USERNAME or not APP_LOGIN_PASSWORD:
+        return
+
+    auth_box = st.sidebar.container()
+
+    if st.session_state.get("auth_user"):
+        auth_box.success(f"👤 已登入：{st.session_state['auth_user']}")
+        if auth_box.button("登出", key="logout_button"):
+            st.session_state.pop("auth_user", None)
+            st.session_state.pop("auth_error", None)
+            st.rerun()
+        return
+
+    auth_box.warning("請登入以使用系統")
+
+    with auth_box.form("login_form"):
+        username = st.text_input("帳號")
+        password = st.text_input("密碼", type="password")
+        submitted = st.form_submit_button("登入")
+
+    if submitted:
+        if username == APP_LOGIN_USERNAME and password == APP_LOGIN_PASSWORD:
+            st.session_state["auth_user"] = username
+            st.session_state.pop("auth_error", None)
+            st.rerun()
+        else:
+            st.session_state["auth_error"] = "帳號或密碼錯誤，請再試一次。"
+
+    error_message = st.session_state.get("auth_error")
+    if error_message:
+        auth_box.error(error_message)
+
+    st.stop()
+
+
 def page_maps():
     """Page 2: Interactive Case Maps"""
     st.title("🗺️ 急救案件地理視覺化")
@@ -146,7 +189,12 @@ def page_maps():
         districts = sorted([d for d in db_manager.get_distinct_values('incident_district') if d])
     except Exception:
         districts = []
-    selected_district = st.sidebar.selectbox("行政區", ["全部"] + districts)
+    district_options = ["全部"] + districts
+    selected_districts = st.sidebar.multiselect(
+        "行政區",
+        district_options,
+        default=["全部"] if district_options else [],
+    )
 
     try:
         dispatch_options = sorted([d for d in db_manager.get_distinct_values('dispatch_reason') if d])
@@ -164,8 +212,10 @@ def page_maps():
     critical_only = st.sidebar.checkbox("僅顯示危急個案")
 
     filters = {}
-    if selected_district != "全部":
-        filters['district'] = selected_district
+    if selected_districts:
+        filtered_districts = [d for d in selected_districts if d != "全部"]
+        if filtered_districts:
+            filters['districts'] = filtered_districts
     if len(date_range) == 2:
         start_date = datetime.combine(date_range[0], datetime.min.time())
         end_date = datetime.combine(date_range[1], datetime.max.time())
@@ -179,30 +229,26 @@ def page_maps():
         filters['critical_only'] = True
 
     try:
-        df = db_manager.get_cases_dataframe(filters)
+        summary = db_manager.get_cases_summary(filters)
 
-        if df.empty:
+        total_cases = summary.get("total_cases", 0)
+        if total_cases == 0:
             st.warning("沒有符合條件的資料")
             return
 
-        st.info(f"符合條件的案件共 {len(df)} 筆")
-
-        critical_cases = 0
-        if 'critical_case' in df.columns:
-            critical_cases = int(df['critical_case'].fillna(False).astype(int).sum())
-
+        st.info(f"符合條件的案件共 {total_cases:,} 筆")
+        critical_cases = summary.get("critical_cases", 0)
         avg_response_minutes = None
-        if 'response_time_seconds' in df.columns:
-            response_series = df['response_time_seconds'].dropna()
-            if not response_series.empty:
-                avg_response_minutes = response_series.mean() / 60
+        avg_seconds = summary.get("avg_response_seconds")
+        if avg_seconds is not None:
+            avg_response_minutes = avg_seconds / 60.0
 
-        covered_districts = df['incident_district'].nunique() if 'incident_district' in df.columns else 0
-        period_start = df['date'].min() if 'date' in df.columns else None
-        period_end = df['date'].max() if 'date' in df.columns else None
+        covered_districts = summary.get("covered_districts", 0)
+        period_start = summary.get("period_start")
+        period_end = summary.get("period_end")
 
         metric_cols = st.columns(4)
-        metric_cols[0].metric("案件數", f"{len(df):,}")
+        metric_cols[0].metric("案件數", f"{total_cases:,}")
         metric_cols[1].metric("危急案件", f"{critical_cases:,}")
         if avg_response_minutes is not None:
             metric_cols[2].metric("平均反應時間 (分)", f"{avg_response_minutes:.1f}")
@@ -213,7 +259,12 @@ def page_maps():
         if period_start is not None and period_end is not None:
             st.caption(f"資料期間：{period_start:%Y-%m-%d} ～ {period_end:%Y-%m-%d}")
 
-        tab_heatmap, tab_animation, tab_stats = st.tabs(["📍 熱力圖與標記", "⏱️ 時間序列動畫", "📊 統計圖表"])
+        tab_heatmap, tab_animation, tab_stats = st.tabs(
+            ["📍 熱力圖與標記", "⏱️ 時間序列動畫", "📊 統計圖表"]
+        )
+
+        district_stats = None
+        daily_district_counts = None
 
         with tab_heatmap:
             st.markdown("透過熱力圖快速掌握案件密度，並利用標記瀏覽案件細節。")
@@ -225,13 +276,27 @@ def page_maps():
             )
 
             if map_mode == "Folium 熱力圖":
-                with st.spinner("生成熱力圖..."):
-                    heatmap = create_heatmap(df, filters)
-                    st_folium(heatmap, width=None, height=800, returned_objects=[])
-                st.caption(" Folium 熱力圖已改為依行政區聚合，避免大量資料傳輸。")
+                if district_stats is None:
+                    with st.spinner("載入地圖資料..."):
+                        district_stats = db_manager.get_district_aggregates(filters)
+                if district_stats is None or district_stats.empty:
+                    st.warning("目前沒有可用的地圖資料。")
+                else:
+                    with st.spinner("生成熱力圖..."):
+                        heatmap = create_heatmap(district_stats)
+                        st_folium(
+                            heatmap,
+                            width=None,
+                            height=800,
+                            returned_objects=[],
+                        )
+                    st.caption(" Folium 熱力圖已改為依行政區聚合，避免大量資料傳輸。")
             elif map_mode == "Hex 聚合地圖 (pydeck)":
                 with st.spinner("生成 Hex 聚合地圖..."):
-                    deck = create_hex_density_map(df, resolution=8, show_3d=True)
+                    hex_df = db_manager.get_cases_dataframe(
+                        filters, columns=["incident_district"]
+                    )
+                    deck = create_hex_density_map(hex_df, resolution=8, show_3d=True)
                     if deck is None:
                         st.warning(
                             "缺少依賴：請在環境中安裝 pydeck 與 h3 後再試 (`poetry add pydeck h3`)"
@@ -241,7 +306,10 @@ def page_maps():
                 st.caption("Hex 聚合能夠在 40–50 萬筆資料下保持流暢互動。")
             else:
                 with st.spinner("生成 Pydeck 熱力圖 (全量)..."):
-                    deck = create_deck_heatmap(df, radius_pixels=60, intensity=1.0)
+                    deck_df = db_manager.get_cases_dataframe(
+                        filters, columns=["incident_district"]
+                    )
+                    deck = create_deck_heatmap(deck_df, radius_pixels=60, intensity=1.0)
                     if deck is None:
                         st.warning("缺少依賴：請安裝 pydeck 後再試 (`poetry add pydeck`) ")
                     else:
@@ -250,14 +318,26 @@ def page_maps():
 
         with tab_animation:
             st.markdown("時間序列動畫呈現案件發生的累積趨勢與時空分布。")
-            with st.spinner("生成時間動畫..."):
-                animation_fig = create_time_animation_map(df)
-                st.plotly_chart(animation_fig, use_container_width=True)
+            if daily_district_counts is None:
+                with st.spinner("載入時間序列資料..."):
+                    daily_district_counts = db_manager.get_daily_district_counts(filters)
+            if daily_district_counts is None or daily_district_counts.empty:
+                st.warning("目前沒有可用的時間序列資料。")
+            else:
+                with st.spinner("生成時間動畫..."):
+                    animation_fig = create_time_animation_map(daily_district_counts)
+                    st.plotly_chart(animation_fig, use_container_width=True)
 
         with tab_stats:
             st.markdown("多維統計視角幫助追蹤行政區、時段與檢傷等核心指標。")
             with st.spinner("生成統計圖表..."):
-                charts = create_statistics_charts(df)
+                if district_stats is None:
+                    district_stats = db_manager.get_district_aggregates(filters)
+                charts = create_statistics_charts(
+                    db_manager,
+                    filters=filters,
+                    district_summary=district_stats,
+                )
 
                 chart_order = [
                     "time_line",
@@ -452,6 +532,9 @@ def main():
     # Header
     st.title(f"🚁 {APP_TITLE}")
     st.caption(APP_SUBTITLE)
+
+    # Authentication guard must run before exposing other controls
+    ensure_authenticated()
 
     # Check API key
     if not check_api_key():

@@ -7,7 +7,6 @@ from folium.plugins import HeatMap, MiniMap, Fullscreen
 from branca.colormap import LinearColormap
 import plotly.express as px
 import plotly.graph_objects as go
-from typing import Dict, Any, Optional
 import math
 
 from config import DEFAULT_MAP_CENTER, DEFAULT_MAP_ZOOM
@@ -88,38 +87,21 @@ def geocode_address(address: str) -> tuple:
 
 
 def create_heatmap(
-    df: pd.DataFrame,
-    filters: Optional[Dict[str, Any]] = None,
-    *,
-    max_heatmap_points: Optional[int] = None,
+    district_df: pd.DataFrame,
 ) -> folium.Map:
     """
     Create an interactive heatmap with markers
     
     Args:
-        df: DataFrame with emergency cases
-        filters: Optional filters dict
+        district_df: Aggregated DataFrame with columns:
+            - incident_district
+            - case_count
+            - critical_count
+            - avg_response_seconds
     
     Returns:
         folium.Map object
     """
-    # Parameter retained for backward compatibility (aggregation removes need for sampling)
-    _ = max_heatmap_points
-    # Apply filters if provided
-    if filters:
-        if 'start_date' in filters and 'date' in df.columns:
-            df = df[df['date'] >= pd.to_datetime(filters['start_date'])]
-        if 'end_date' in filters and 'date' in df.columns:
-            df = df[df['date'] <= pd.to_datetime(filters['end_date'])]
-        if 'district' in filters and filters['district'] and 'incident_district' in df.columns:
-            df = df[df['incident_district'] == filters['district']]
-        if 'dispatch_reasons' in filters and filters['dispatch_reasons'] and 'dispatch_reason' in df.columns:
-            df = df[df['dispatch_reason'].isin(filters['dispatch_reasons'])]
-        if 'triage_levels' in filters and filters['triage_levels'] and 'triage_level' in df.columns:
-            df = df[df['triage_level'].isin(filters['triage_levels'])]
-        if 'critical_only' in filters and filters['critical_only'] and 'critical_case' in df.columns:
-            df = df[df['critical_case'] == True]
-
     # Create base map
     m = folium.Map(
         location=DEFAULT_MAP_CENTER,
@@ -148,33 +130,37 @@ def create_heatmap(
     MiniMap(toggle_display=True).add_to(m)
     Fullscreen(position='topleft').add_to(m)
 
-    # Prepare aggregated statistics by district to minimize payload
-    if 'incident_district' not in df.columns:
+    required_columns = {'incident_district', 'case_count'}
+    if not required_columns.issubset(district_df.columns):
         folium.LayerControl(collapsed=False).add_to(m)
         return m
 
     # Only consider districts with known coordinates
-    df_geo = df[df['incident_district'].isin(DISTRICT_COORDINATES)].copy()
+    df_geo = district_df[
+        district_df['incident_district'].isin(DISTRICT_COORDINATES)
+    ].copy()
     if df_geo.empty:
         folium.LayerControl(collapsed=False).add_to(m)
         return m
 
-    agg_df = df_geo.groupby('incident_district').agg(
-        count=('incident_district', 'size'),
-        critical_count=('critical_case', lambda s: int(pd.Series(s).fillna(False).astype(int).sum()) if s is not None else 0),
-        avg_response=('response_time_seconds', 'mean'),
-    ).reset_index()
-
-    agg_df['lat'] = agg_df['incident_district'].map(lambda d: DISTRICT_COORDINATES[d][0])
-    agg_df['lon'] = agg_df['incident_district'].map(lambda d: DISTRICT_COORDINATES[d][1])
-    agg_df['critical_ratio'] = agg_df.apply(
-        lambda row: (row['critical_count'] / row['count']) if row['count'] else 0.0,
-        axis=1
+    df_geo['lat'] = df_geo['incident_district'].map(
+        lambda d: DISTRICT_COORDINATES[d][0]
     )
-    agg_df['avg_response_min'] = agg_df['avg_response'].apply(lambda v: (v / 60.0) if pd.notna(v) else None)
+    df_geo['lon'] = df_geo['incident_district'].map(
+        lambda d: DISTRICT_COORDINATES[d][1]
+    )
+    df_geo['critical_ratio'] = df_geo.apply(
+        lambda row: (row['critical_count'] / row['case_count'])
+        if row['case_count']
+        else 0.0,
+        axis=1,
+    )
+    df_geo['avg_response_min'] = df_geo['avg_response_seconds'].apply(
+        lambda v: (v / 60.0) if pd.notna(v) else None
+    )
 
     # Heatmap data uses weight per district instead of every case
-    heat_data = agg_df[['lat', 'lon', 'count']].values.tolist()
+    heat_data = df_geo[['lat', 'lon', 'case_count']].values.tolist()
     if heat_data:
         HeatMap(
             heat_data,
@@ -185,8 +171,8 @@ def create_heatmap(
         ).add_to(m)
 
         # Color scale for circle markers (lighter for少量, darker for大量)
-        min_count = float(agg_df['count'].min())
-        max_count = float(agg_df['count'].max())
+        min_count = float(df_geo['case_count'].min())
+        max_count = float(df_geo['case_count'].max())
         if min_count == max_count:
             # Expand range slightly to avoid degenerate colormap
             min_count -= 1
@@ -201,8 +187,10 @@ def create_heatmap(
         color_scale.add_to(m)
 
         # Add one marker per district summarizing key metrics
-        max_count_root = math.sqrt(float(agg_df['count'].max())) if max_count > 0 else 1.0
-        for _, row in agg_df.iterrows():
+        max_count_root = (
+            math.sqrt(float(df_geo['case_count'].max())) if max_count > 0 else 1.0
+        )
+        for _, row in df_geo.iterrows():
             popup_html = """
             <div style=\"width: 260px;\">
                 <h4 style=\"margin-bottom:6px;\">{district}</h4>
@@ -216,14 +204,18 @@ def create_heatmap(
             avg_response_disp = f"{row['avg_response_min']:.1f} 分" if row['avg_response_min'] is not None else "—"
             popup_html = popup_html.format(
                 district=row['incident_district'],
-                count=int(row['count']),
+                count=int(row['case_count']),
                 critical_ratio=row['critical_ratio'],
                 avg_response=avg_response_disp,
             )
 
             # Scale circle radius by square root to avoid極端差距
-            radius = 8 + 20 * (math.sqrt(row['count']) / max_count_root) if max_count_root else 10
-            fill_color = color_scale(float(row['count']))
+            radius = (
+                8 + 20 * (math.sqrt(row['case_count']) / max_count_root)
+                if max_count_root
+                else 10
+            )
+            fill_color = color_scale(float(row['case_count']))
 
             folium.CircleMarker(
                 location=[row['lat'], row['lon']],
@@ -233,7 +225,7 @@ def create_heatmap(
                 fill=True,
                 fill_color=fill_color,
                 fill_opacity=0.75,
-                tooltip=f"{row['incident_district']}：{int(row['count']):,} 件",
+                tooltip=f"{row['incident_district']}：{int(row['case_count']):,} 件",
                 popup=folium.Popup(popup_html, max_width=320),
             ).add_to(m)
 
@@ -248,7 +240,7 @@ def create_heatmap(
                 '<span style="font-size:{fs}px;font-style:bold;color:#000000;'
                 'padding:2px 6px;border-radius:12px;'
                 '">{count}</span></div>'
-            ).format(fs=int(font_size), count=f"{int(row['count']):,}")
+            ).format(fs=int(font_size), count=f"{int(row['case_count']):,}")
             folium.map.Marker(
                 location=[row['lat'], row['lon']],
                 icon=folium.DivIcon(
@@ -262,13 +254,14 @@ def create_heatmap(
     return m
 
 
-def create_time_animation_map(df: pd.DataFrame) -> go.Figure:
+def create_time_animation_map(daily_df: pd.DataFrame) -> go.Figure:
     """
     Animated map where bubble size encodes case count by day+district and
     color encodes critical ratio.
     """
-    df_anim = df.copy()
-    if 'date' not in df_anim.columns or 'incident_district' not in df_anim.columns:
+    df_anim = daily_df.copy()
+    required_columns = {'date', 'incident_district', 'case_count', 'critical_count'}
+    if not required_columns.issubset(df_anim.columns):
         fig = go.Figure()
         fig.update_layout(title="缺少日期或行政區欄位", height=600)
         return fig
@@ -280,17 +273,22 @@ def create_time_animation_map(df: pd.DataFrame) -> go.Figure:
         fig.update_layout(title="無可用的地理位置資料", height=600)
         return fig
 
-    df_anim['date_only'] = df_anim['date'].dt.date
-    df_anim['critical_case'] = df_anim.get('critical_case', False).fillna(False).astype(int)
-    grouped = df_anim.groupby(['date_only', 'incident_district']).agg(
-        count=('incident_district', 'size'),
-        critical_count=('critical_case', 'sum'),
-    ).reset_index()
-    grouped['date_str'] = grouped['date_only'].astype(str)
-    grouped['critical_ratio'] = (grouped['critical_count'] / grouped['count']).fillna(0.0)
-    grouped['lat'] = grouped['incident_district'].map(lambda d: DISTRICT_COORDINATES.get(d, [None, None])[0])
-    grouped['lon'] = grouped['incident_district'].map(lambda d: DISTRICT_COORDINATES.get(d, [None, None])[1])
-    map_df = grouped.dropna(subset=['lat', 'lon']).copy().sort_values('date_only')
+    df_anim['date_str'] = df_anim['date'].dt.date.astype(str)
+    base_counts = df_anim['case_count'].replace({0: pd.NA})
+    df_anim['critical_ratio'] = (
+        df_anim['critical_count'] / base_counts
+    ).fillna(0.0)
+    df_anim['lat'] = df_anim['incident_district'].map(
+        lambda d: DISTRICT_COORDINATES.get(d, [None, None])[0]
+    )
+    df_anim['lon'] = df_anim['incident_district'].map(
+        lambda d: DISTRICT_COORDINATES.get(d, [None, None])[1]
+    )
+    map_df = (
+        df_anim.dropna(subset=['lat', 'lon'])
+        .copy()
+        .sort_values('date')
+    )
     if map_df.empty:
         fig = go.Figure()
         fig.update_layout(title="無可用的地理位置資料", height=600)
@@ -300,13 +298,13 @@ def create_time_animation_map(df: pd.DataFrame) -> go.Figure:
         map_df,
         lat='lat',
         lon='lon',
-        size='count',
+        size='case_count',
         size_max=48,
         color='critical_ratio',
         color_continuous_scale='YlOrRd',
         range_color=(0, 1),
         hover_name='incident_district',
-        hover_data={'count': True, 'critical_ratio': ':.2f', 'lat': False, 'lon': False},
+        hover_data={'case_count': True, 'critical_ratio': ':.2f', 'lat': False, 'lon': False},
         animation_frame='date_str',
         zoom=10,
         center={'lat': DEFAULT_MAP_CENTER[0], 'lon': DEFAULT_MAP_CENTER[1]},
