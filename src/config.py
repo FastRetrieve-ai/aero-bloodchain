@@ -29,6 +29,8 @@ DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{DB_DIR}/bloodchain.db")
 # Application Settings
 APP_TITLE = "熱血飛騰：血品供應韌性系統"
 APP_SUBTITLE = "Emergency Blood Chain System"
+APP_LOGIN_USERNAME = os.getenv("APP_LOGIN_USERNAME", "").strip()
+APP_LOGIN_PASSWORD = os.getenv("APP_LOGIN_PASSWORD", "")
 
 # Map Configuration
 DEFAULT_MAP_CENTER = [25.0330, 121.5654]  # Taipei coordinates
