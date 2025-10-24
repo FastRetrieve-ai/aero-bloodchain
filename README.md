@@ -33,6 +33,7 @@
 - Python 3.10 或更高版本
 - Poetry (Python 依賴管理工具)
 - OpenAI API Key
+- OpenRouteService API Key（可選，用於責任醫院等時線）
 
 ## 安裝步驟
 
@@ -75,6 +76,10 @@ SQL_QA_MODEL=
 # 可選：啟用簡易登入保護（兩者皆需設定）
 APP_LOGIN_USERNAME=
 APP_LOGIN_PASSWORD=
+
+# Optional: OpenRouteService 等時線 API
+OPENROUTESERVICE_API_KEY=
+# OPENROUTESERVICE_BASE_URL=https://api.openrouteservice.org
 ```
 
 或者，使用 Streamlit secrets (推薦用於生產環境)：
@@ -92,7 +97,20 @@ OPENAI_API_KEY = "your_openai_api_key_here"
 # APP_LOGIN_PASSWORD = "changeme"
 ```
 
-### 5. 載入數據到資料庫
+### 5. 預先建立 OpenRouteService 等時線快取（建議）
+
+等時線圖層會在 Streamlit 地圖頁面載入快取檔案 `data/hospital_isochrones.geojson`。
+首次部署或更新 `data/hospital.json` 後，請執行下列指令產生最新快取：
+
+```bash
+poetry run python scripts/cache_isochrones.py
+```
+
+指令會對每間責任醫院呼叫 OpenRouteService Isochrones API，生成 30/60/120 分鐘的範圍多邊形。
+若沒有設置 `OPENROUTESERVICE_API_KEY`，腳本會直接提示錯誤並中止。產出檔案不應提交至版本控制，
+但可放心放在本機 `data/` 目錄供應用程式讀取。
+
+### 6. 載入數據到資料庫
 
 在執行應用程式之前，需要先將 Excel/CSV 檔案的數據載入到 SQL 資料庫：
 
@@ -165,6 +183,7 @@ poetry run streamlit run src/main.py --server.port 80 --server.address 0.0.0.0
 **功能特色**：
 
 - **熱力圖與標記**：顯示案件分布密度，點擊標記查看詳情
+- **急救責任醫院地圖**：以顏色與 emoji 呈現醫院分級，可選擇疊加 30/60/120 分交通等時線（需設定 OpenRouteService API 並先執行 `scripts/cache_isochrones.py` 快取）
 - **時間序列動畫**：播放案件隨時間的變化
 - **統計圖表**：各行政區案件數、時段分布、反應時間等
 

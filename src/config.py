@@ -36,6 +36,14 @@ APP_LOGIN_PASSWORD = os.getenv("APP_LOGIN_PASSWORD", "")
 DEFAULT_MAP_CENTER = [25.0330, 121.5654]  # Taipei coordinates
 DEFAULT_MAP_ZOOM = 11
 
+# OpenRouteService Configuration
+OPENROUTESERVICE_API_KEY = os.getenv("OPENROUTESERVICE_API_KEY", "").strip()
+OPENROUTESERVICE_BASE_URL = (
+    os.getenv("OPENROUTESERVICE_BASE_URL", "https://api.openrouteservice.org")
+    .strip()
+    .rstrip("/")
+)
+
 # Embedding Configuration
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200

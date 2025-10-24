@@ -30,6 +30,7 @@ scikit-learn = "^1.4.0"
 langchain-experimental = "^0.3.4"
 pydeck = "^0.9.1"
 h3 = "^3.7.6"
+shapely = "^2.0.4"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.4.4"
