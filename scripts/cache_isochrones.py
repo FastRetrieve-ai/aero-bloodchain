@@ -69,9 +69,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--sleep",
         type=float,
-        default=1.0,
+        default=5.0,
         metavar="SECONDS",
-        help="Delay between API calls to avoid rate limits (default: 1.0).",
+        help="Delay between API calls to avoid rate limits (default: 5.0).",
     )
     parser.add_argument(
         "--force",

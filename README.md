@@ -106,11 +106,23 @@ OPENAI_API_KEY = "your_openai_api_key_here"
 poetry run python scripts/cache_isochrones.py
 ```
 
-指令會對每間責任醫院呼叫 OpenRouteService Isochrones API，生成 30/60/120 分鐘的範圍多邊形。
+指令會對每間責任醫院呼叫 OpenRouteService Isochrones API，生成 30/60 分鐘的範圍多邊形。
 若沒有設置 `OPENROUTESERVICE_API_KEY`，腳本會直接提示錯誤並中止。產出檔案不應提交至版本控制，
 但可放心放在本機 `data/` 目錄供應用程式讀取。
 
-### 6. 載入數據到資料庫
+### 6. （可選）使用 Google Maps 重新補完座標
+
+若 CSV 未提供正確的經緯度，可使用 Geocoding API 重新查詢後輸出 JSON：
+
+```bash
+poetry run python scripts/geocode_csv_addresses.py data/新北市消防.csv data/fire-station.json --sleep 0.2
+```
+
+指令會逐列讀取 CSV，呼叫 Google Maps API 取得經度與緯度並覆寫輸出 JSON。請先在 `.env` 設定
+`GOOGLE_MAPS_API_KEY`，必要時可透過 `--address-column` 指定地址欄位名稱。`--sleep` 參數可調整
+兩次請求間的等待時間，避免觸發速率限制。
+
+### 7. 載入數據到資料庫
 
 在執行應用程式之前，需要先將 Excel/CSV 檔案的數據載入到 SQL 資料庫：
 
@@ -184,6 +196,7 @@ poetry run streamlit run src/main.py --server.port 80 --server.address 0.0.0.0
 
 - **熱力圖與標記**：顯示案件分布密度，點擊標記查看詳情
 - **急救責任醫院地圖**：以顏色與 emoji 呈現醫院分級，可選擇疊加 30/60/120 分交通等時線（需設定 OpenRouteService API 並先執行 `scripts/cache_isochrones.py` 快取）
+- **消防分隊覆蓋視圖**：使用 🚒 emoji 呈現消防分隊位置，支援按分隊開關以對照醫院等時線與案件熱點
 - **時間序列動畫**：播放案件隨時間的變化
 - **統計圖表**：各行政區案件數、時段分布、反應時間等
 
@@ -194,6 +207,7 @@ poetry run streamlit run src/main.py --server.port 80 --server.address 0.0.0.0
 - 派遣原因（多選）
 - 檢傷分級（多選）
 - 僅顯示危急個案
+- 側邊欄可勾選是否顯示責任醫院、消防分隊與 30/60 分交通等時線，快速對照緊急資源覆蓋情況
 
 ### 3. 數據分析問答
 

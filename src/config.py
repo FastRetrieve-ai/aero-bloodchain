@@ -36,6 +36,16 @@ APP_LOGIN_PASSWORD = os.getenv("APP_LOGIN_PASSWORD", "")
 DEFAULT_MAP_CENTER = [25.0330, 121.5654]  # Taipei coordinates
 DEFAULT_MAP_ZOOM = 11
 
+GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
+GOOGLE_GEOCODE_ENDPOINT = (
+    os.getenv(
+        "GOOGLE_GEOCODE_ENDPOINT",
+        "https://maps.googleapis.com/maps/api/geocode/json",
+    )
+    .strip()
+    .rstrip("/")
+)
+
 # OpenRouteService Configuration
 OPENROUTESERVICE_API_KEY = os.getenv("OPENROUTESERVICE_API_KEY", "").strip()
 OPENROUTESERVICE_BASE_URL = (
