@@ -84,6 +84,7 @@ DISTRICT_COORDINATES.update({
 HOSPITAL_DATA_PATH = DATA_DIR / "hospital.json"
 FIRE_STATION_DATA_PATH = DATA_DIR / "fire-station.json"
 ISOCHRONE_CACHE_FILE = DATA_DIR / "hospital_isochrones.geojson"
+ISOCHRONE_SIMPLIFIED_FILE = DATA_DIR / "hospital_isochrones.simplified.geojson"
 
 HOSPITAL_LEVEL_STYLES: Dict[str, Dict[str, str]] = {
     "重度": {"color": "#d73027", "emoji": "🏥"},
@@ -215,6 +216,67 @@ def _load_cached_isochrones() -> Dict[str, Dict[int, List[Dict[str, Any]]]]:
             continue
         cache.setdefault(slug, {}).setdefault(minute_value, []).append(feature)
     return cache
+
+
+@lru_cache(maxsize=1)
+def _load_unionized_isochrones() -> Dict[int, List[Dict[str, Any]]]:
+    """
+    Load unionized isochrone features grouped by minutes.
+
+    Prefers the simplified cache if available; otherwise falls back to
+    runtime union across hospital-specific geometries.
+    """
+    if ISOCHRONE_SIMPLIFIED_FILE.exists():
+        try:
+            with ISOCHRONE_SIMPLIFIED_FILE.open("r", encoding="utf-8") as fp:
+                payload = json.load(fp)
+        except (OSError, json.JSONDecodeError):
+            pass
+        else:
+            simplified_features: Dict[int, List[Dict[str, Any]]] = {}
+            for feature in payload.get("features", []):
+                props = feature.get("properties", {}) or {}
+                minutes = props.get("minutes")
+                if minutes is None and "value" in props:
+                    minutes = int(round(float(props["value"]) / 60.0))
+                if minutes is None:
+                    continue
+                minutes = int(minutes)
+                simplified_features.setdefault(minutes, []).append(feature)
+            if simplified_features:
+                return simplified_features
+
+    # Fallback to aggregating the raw cache, unioning when possible
+    hospital_isochrones = _load_cached_isochrones()
+    if not hospital_isochrones:
+        return {}
+
+    aggregated: Dict[int, List[Dict[str, Any]]] = {}
+    for minute_map in hospital_isochrones.values():
+        for minute, features in minute_map.items():
+            aggregated.setdefault(minute, []).extend(features)
+
+    unionized: Dict[int, List[Dict[str, Any]]] = {}
+    for minute, features in aggregated.items():
+        if SHAPELY_AVAILABLE:
+            union_features = _union_geojson_features(features)
+        else:
+            union_features = features
+        processed: List[Dict[str, Any]] = []
+        for feature in union_features:
+            geom = feature.get("geometry")
+            if not geom:
+                continue
+            processed.append(
+                {
+                    "type": "Feature",
+                    "geometry": geom,
+                    "properties": {"minutes": minute},
+                }
+            )
+        unionized[minute] = processed
+
+    return unionized
 
 
 def _prepare_hospital_dataframe(
@@ -387,24 +449,26 @@ def _build_hospital_layers(
         hospital_groups["__default__"] = folium.FeatureGroup(name="其他責任醫院", show=True)
         hospital_group_counts["__default__"] = 0
 
-    cached_isochrones = _load_cached_isochrones() if include_isochrones else {}
     iso_layers: Dict[int, folium.FeatureGroup] = {}
-    aggregated_isochrones: Dict[int, List[Dict[str, Any]]] = {
-        minute: [] for minute in render_minutes
-    }
-    missing_by_minute: Dict[int, List[str]] = {minute: [] for minute in render_minutes}
-
-    if include_isochrones and not cached_isochrones:
-        warnings.append(
-            "尚未找到預先建立的等時線資料（data/hospital_isochrones.geojson）。"
-            " 請先執行 `poetry run python scripts/cache_isochrones.py` 後再試。"
-        )
-        include_isochrones = False
+    unionized_isochrones: Dict[int, List[Dict[str, Any]]] = {}
+    if include_isochrones:
+        union_data = _load_unionized_isochrones()
+        if not union_data:
+            warnings.append(
+                "尚未找到預先建立的等時線資料，請先執行 `scripts/cache_isochrones.py` 與 "
+                "`scripts/simplify_isochrones.py` 產生快取。"
+            )
+            include_isochrones = False
+        else:
+            unionized_isochrones = {
+                minute: union_data.get(minute, [])
+                for minute in render_minutes
+                if union_data.get(minute)
+            }
 
     for _, row in hospital_df_local.iterrows():
         level = row["level"] or ""
         style = HOSPITAL_LEVEL_STYLES.get(level, DEFAULT_HOSPITAL_STYLE)
-        slug = _slugify_hospital_name(row["name"])
 
         if include_hospitals:
             group_key = level if level in hospital_groups else "__default__"
@@ -444,33 +508,21 @@ def _build_hospital_layers(
             ).add_to(target_group)
             hospital_group_counts[group_key] += 1
 
-        if include_isochrones:
-            hospital_iso = cached_isochrones.get(slug, {})
-            for minute in render_minutes:
-                minute_features = hospital_iso.get(minute, [])
-                if minute_features:
-                    aggregated_isochrones[minute].extend(minute_features)
-                else:
-                    missing_by_minute.setdefault(minute, []).append(row["name"])
-
     if include_isochrones:
-        for minute in render_minutes:
-            minute_features = aggregated_isochrones.get(minute, [])
+        for minute, minute_features in unionized_isochrones.items():
             if not minute_features:
-                continue
-            union_features = _union_geojson_features(minute_features)
-            if not union_features:
                 continue
             layer = folium.FeatureGroup(
                 name=f"{minute} 分等時線",
-                # show=(minute == min(normalized_minutes)),
                 show=True,
             )
             style_cfg = ISOCHRONE_STYLE_BY_MINUTE.get(
                 minute,
                 {"color": "#3182bd", "fillColor": "#9ecae1", "fillOpacity": 0.18},
             )
-            for feature in union_features:
+            for feature in minute_features:
+                if "geometry" not in feature:
+                    continue
                 geojson = folium.GeoJson(
                     feature,
                     style_function=_geojson_style(style_cfg),
@@ -479,13 +531,6 @@ def _build_hospital_layers(
                 geojson.add_child(folium.Tooltip(f"{minute} 分涵蓋區域"))
                 geojson.add_to(layer)
             iso_layers[minute] = layer
-
-        for minute, missing_names in missing_by_minute.items():
-            if missing_names:
-                hospitals_str = "、".join(sorted(set(missing_names)))
-                warnings.append(
-                    f"下列醫院缺少 {minute} 分等時線資料：{hospitals_str}"
-                )
 
     hospital_groups_list: List[folium.FeatureGroup] = []
     if include_hospitals:

@@ -110,6 +110,16 @@ poetry run python scripts/cache_isochrones.py
 若沒有設置 `OPENROUTESERVICE_API_KEY`，腳本會直接提示錯誤並中止。產出檔案不應提交至版本控制，
 但可放心放在本機 `data/` 目錄供應用程式讀取。
 
+為了減少 GeoJSON 的頂點數與 Streamlit 傳輸量，建議再執行簡化腳本，產生 union 後的等時線檔案：
+
+```bash
+poetry run python scripts/simplify_isochrones.py data/hospital_isochrones.geojson
+```
+
+預設會寫出 `data/hospital_isochrones.simplified.geojson`，主程式會優先載入此檔案；若不存在才回退到原始
+檔案並於記憶體中合併。可用 `--tolerance` 調整簡化精度，或加上 `--difference-ring` 產出「60 分鐘減
+30 分鐘」的環帶視圖（可更清楚看到新增的救援覆蓋）。
+
 ### 6. （可選）使用 Google Maps 重新補完座標
 
 若 CSV 未提供正確的經緯度，可使用 Geocoding API 重新查詢後輸出 JSON：
