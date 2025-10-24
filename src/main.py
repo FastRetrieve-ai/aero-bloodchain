@@ -22,8 +22,6 @@ from qa_bot.manual_qa import ManualQABot
 from visualization.map_view import (
     create_heatmap,
     create_time_animation_map,
-    create_hex_density_map,
-    create_deck_heatmap,
 )
 from visualization.charts import create_statistics_charts
 from analytics.data_qa import DataQABot
@@ -268,53 +266,55 @@ def page_maps():
 
         with tab_heatmap:
             st.markdown("透過熱力圖快速掌握案件密度，並利用標記瀏覽案件細節。")
-            map_mode = st.radio(
-                "地圖模式",
-                # ["Folium 熱力圖", "Hex 聚合地圖 (pydeck)", "Pydeck 熱力圖 (全量)"]
-                ["Folium 熱力圖"],
-                horizontal=True,
+            show_hospitals = st.checkbox(
+                "🏥 顯示責任醫院位置",
+                value=True,
+                key="map_show_hospitals",
+            )
+            show_isochrones = st.checkbox(
+                "🚕 顯示 30/60 分交通等時線",
+                value=True,
+                key="map_show_isochrones",
+            )
+            show_fire_stations = st.checkbox(
+                "🚒 顯示消防分隊位置",
+                value=True,
+                key="map_show_fire_stations",
             )
 
-            if map_mode == "Folium 熱力圖":
-                if district_stats is None:
-                    with st.spinner("載入地圖資料..."):
-                        district_stats = db_manager.get_district_aggregates(filters)
-                if district_stats is None or district_stats.empty:
-                    st.warning("目前沒有可用的地圖資料。")
-                else:
-                    with st.spinner("生成熱力圖..."):
-                        heatmap = create_heatmap(district_stats)
-                        st_folium(
-                            heatmap,
-                            width=None,
-                            height=800,
-                            returned_objects=[],
-                        )
-                    st.caption(" Folium 熱力圖已改為依行政區聚合，避免大量資料傳輸。")
-            elif map_mode == "Hex 聚合地圖 (pydeck)":
-                with st.spinner("生成 Hex 聚合地圖..."):
-                    hex_df = db_manager.get_cases_dataframe(
-                        filters, columns=["incident_district"]
-                    )
-                    deck = create_hex_density_map(hex_df, resolution=8, show_3d=True)
-                    if deck is None:
-                        st.warning(
-                            "缺少依賴：請在環境中安裝 pydeck 與 h3 後再試 (`poetry add pydeck h3`)"
-                        )
-                    else:
-                        st.pydeck_chart(deck, use_container_width=True, height=520)
-                st.caption("Hex 聚合能夠在 40–50 萬筆資料下保持流暢互動。")
+            if district_stats is None:
+                with st.spinner("載入地圖資料..."):
+                    district_stats = db_manager.get_district_aggregates(filters)
+            if district_stats is None or district_stats.empty:
+                st.warning("目前沒有可用的地圖資料。")
             else:
-                with st.spinner("生成 Pydeck 熱力圖 (全量)..."):
-                    deck_df = db_manager.get_cases_dataframe(
-                        filters, columns=["incident_district"]
+                with st.spinner("生成熱力圖與責任醫院圖層..."):
+                    heatmap_map, map_messages = create_heatmap(
+                        district_stats,
+                        include_hospitals=show_hospitals,
+                        include_isochrones=show_isochrones,
+                        include_fire_stations=show_fire_stations,
                     )
-                    deck = create_deck_heatmap(deck_df, radius_pixels=60, intensity=1.0)
-                    if deck is None:
-                        st.warning("缺少依賴：請安裝 pydeck 後再試 (`poetry add pydeck`) ")
-                    else:
-                        st.pydeck_chart(deck, use_container_width=True, height=520)
-                st.caption("此模式會傳送所有點位，適合強機或生產部署環境。")
+                    st_folium(
+                        heatmap_map,
+                        width=None,
+                        height=800,
+                        returned_objects=[],
+                    )
+                caption_parts = []
+                if show_hospitals:
+                    caption_parts.append("責任醫院資料來源：衛福部")
+                if show_isochrones:
+                    caption_parts.append("等時線來源：OpenRouteService")
+                if show_fire_stations:
+                    caption_parts.append("消防隊資料來源：新北市政府消防局")
+                if caption_parts:
+                    st.caption("；".join(caption_parts))
+                else:
+                    st.caption("Folium 熱力圖依行政區聚合，避免大量資料傳輸。")
+                if map_messages:
+                    for message in dict.fromkeys(map_messages):
+                        st.warning(message)
 
         with tab_animation:
             st.markdown("時間序列動畫呈現案件發生的累積趨勢與時空分布。")

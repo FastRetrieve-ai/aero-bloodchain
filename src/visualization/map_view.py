@@ -1,15 +1,36 @@
 """
 Interactive map visualizations for emergency cases
 """
-import pandas as pd
+import json
+import math
+import re
+from functools import lru_cache
+from typing import Any, Dict, Iterable, List, Sequence, Tuple
+
 import folium
-from folium.plugins import HeatMap, MiniMap, Fullscreen
+import pandas as pd
 from branca.colormap import LinearColormap
+from branca.element import MacroElement, Template
+from folium.plugins import Fullscreen, HeatMap, MiniMap
 import plotly.express as px
 import plotly.graph_objects as go
-import math
 
-from config import DEFAULT_MAP_CENTER, DEFAULT_MAP_ZOOM
+from config import DATA_DIR, DEFAULT_MAP_CENTER, DEFAULT_MAP_ZOOM
+
+try:
+    from shapely.geometry import GeometryCollection, shape, mapping
+    from shapely.ops import unary_union
+    from shapely.geometry.base import BaseGeometry
+    from shapely import geometry as shapely_geometry
+    SHAPELY_AVAILABLE = True
+except Exception:  # pragma: no cover - optional dependency
+    SHAPELY_AVAILABLE = False
+    GeometryCollection = None  # type: ignore
+    BaseGeometry = None  # type: ignore
+    shapely_geometry = None  # type: ignore
+    shape = None  # type: ignore
+    mapping = None  # type: ignore
+    unary_union = None  # type: ignore
 
 
 # District coordinates for New Taipei City
@@ -60,6 +81,586 @@ DISTRICT_COORDINATES.update({
     "集集鎮": [23.8286, 120.7864],   # Jiji Township
 })
 
+HOSPITAL_DATA_PATH = DATA_DIR / "hospital.json"
+FIRE_STATION_DATA_PATH = DATA_DIR / "fire-station.json"
+ISOCHRONE_CACHE_FILE = DATA_DIR / "hospital_isochrones.geojson"
+
+HOSPITAL_LEVEL_STYLES: Dict[str, Dict[str, str]] = {
+    "重度": {"color": "#d73027", "emoji": "🏥"},
+    "中度": {"color": "#fc8d59", "emoji": "🏥"},
+    "一般": {"color": "#7fc97f", "emoji": "🏨"},
+}
+DEFAULT_HOSPITAL_STYLE = {"color": "#636363", "emoji": "🏥"}
+
+FIRE_STATION_EMOJI = "🚒"
+FIRE_STATION_COLORS = [
+    "#e41a1c",
+    "#377eb8",
+    "#4daf4a",
+    "#984ea3",
+    "#ff7f00",
+    "#a65628",
+    "#f781bf",
+    "#999999",
+]
+
+ISOCHRONE_SUPPORTED_MINUTES: Tuple[int, int] = (30, 60)
+ISOCHRONE_DEFAULT_MINUTES: Tuple[int, int] = ISOCHRONE_SUPPORTED_MINUTES
+ISOCHRONE_STYLE_BY_MINUTE: Dict[int, Dict[str, Any]] = {
+    30: {"color": "#1f78b4", "fillColor": "#1f78b4", "fillOpacity": 0.35},
+    60: {"color": "#fdae61", "fillColor": "#fdae61", "fillOpacity": 0.25},
+}
+
+_SLUG_CLEAN_PATTERN = re.compile(r"[^0-9a-zA-Z]+")
+
+
+def _create_base_map() -> folium.Map:
+    """Create a Folium base map with shared tiles and mini-map controls."""
+    base_map = folium.Map(
+        location=DEFAULT_MAP_CENTER,
+        zoom_start=DEFAULT_MAP_ZOOM,
+        tiles="OpenStreetMap",
+        control_scale=True,
+    )
+    MiniMap(toggle_display=True).add_to(base_map)
+    Fullscreen(position='topleft').add_to(base_map)
+    return base_map
+
+
+def _slugify_hospital_name(name: str) -> str:
+    """Create a deterministic slug for hospital names."""
+    slug = _SLUG_CLEAN_PATTERN.sub("-", str(name).strip()).strip("-").lower()
+    return slug or "hospital"
+
+
+def _union_geojson_features(
+    features: Iterable[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Union a collection of GeoJSON features if Shapely is available."""
+    feature_list = [feature for feature in features if feature.get("geometry")]
+    if not feature_list:
+        return []
+
+    if not SHAPELY_AVAILABLE:
+        return feature_list
+
+    geometries: List[BaseGeometry] = []
+    for feature in feature_list:
+        try:
+            geometries.append(shape(feature["geometry"]))
+        except Exception:
+            continue
+
+    if not geometries:
+        return []
+
+    try:
+        unioned = unary_union(geometries)
+    except Exception:
+        return feature_list
+
+    if unioned.is_empty:
+        return []
+
+    unified_features: List[Dict[str, Any]] = []
+
+    def append_geometry(geom: BaseGeometry) -> None:
+        if geom.is_empty:
+            return
+        if isinstance(geom, GeometryCollection):
+            for sub_geom in geom:
+                append_geometry(sub_geom)
+            return
+        if geom.geom_type == "MultiPolygon":
+            for sub_geom in geom.geoms:
+                append_geometry(sub_geom)
+            return
+        unified_features.append(
+            {
+                "type": "Feature",
+                "geometry": mapping(geom),
+                "properties": {},
+            }
+        )
+
+    append_geometry(unioned)
+    return unified_features or feature_list
+
+
+@lru_cache(maxsize=1)
+def _load_cached_isochrones() -> Dict[str, Dict[int, List[Dict[str, Any]]]]:
+    """Load cached isochrone GeoJSON into a lookup keyed by hospital slug and minute."""
+    if not ISOCHRONE_CACHE_FILE.exists():
+        return {}
+
+    try:
+        with ISOCHRONE_CACHE_FILE.open("r", encoding="utf-8") as fp:
+            payload = json.load(fp)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    features = payload.get("features", [])
+    cache: Dict[str, Dict[int, List[Dict[str, Any]]]] = {}
+    for feature in features:
+        props = feature.get("properties", {})
+        slug = props.get("hospital_slug")
+        if not slug:
+            name = props.get("hospital_name")
+            if not isinstance(name, str):
+                continue
+            slug = _slugify_hospital_name(name)
+        try:
+            minute_value = int(props.get("minutes"))
+        except (TypeError, ValueError):
+            continue
+        cache.setdefault(slug, {}).setdefault(minute_value, []).append(feature)
+    return cache
+
+
+def _prepare_hospital_dataframe(
+    hospital_df: pd.DataFrame | None,
+) -> tuple[pd.DataFrame, List[str]]:
+    """Load and standardize the hospital dataset."""
+    warnings: List[str] = []
+    if hospital_df is None:
+        try:
+            if not HOSPITAL_DATA_PATH.exists():
+                warnings.append("找不到 data/hospital.json，無法載入急救責任醫院資料。")
+                return pd.DataFrame(), warnings
+            with HOSPITAL_DATA_PATH.open("r", encoding="utf-8") as fp:
+                raw_data = json.load(fp)
+            hospital_df_local = pd.DataFrame(raw_data)
+        except (OSError, json.JSONDecodeError) as exc:
+            warnings.append(f"讀取 hospital.json 時發生錯誤：{exc}")
+            return pd.DataFrame(), warnings
+    else:
+        hospital_df_local = hospital_df.copy()
+
+    if hospital_df_local.empty:
+        warnings.append("沒有可顯示的醫院資料。")
+        return pd.DataFrame(), warnings
+
+    hospital_df_local = hospital_df_local.rename(
+        columns={
+            "醫院全名": "name",
+            "緊急醫療能力分級": "level",
+            "經度": "lon",
+            "緯度": "lat",
+            "縣市別": "city",
+            "區域別": "region",
+        }
+    )
+    text_columns = ["name", "level", "city", "region"]
+    for col in text_columns:
+        if col not in hospital_df_local.columns:
+            hospital_df_local[col] = ""
+        hospital_df_local[col] = (
+            hospital_df_local[col]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+    hospital_df_local["lat"] = pd.to_numeric(
+        hospital_df_local.get("lat"), errors="coerce"
+    )
+    hospital_df_local["lon"] = pd.to_numeric(
+        hospital_df_local.get("lon"), errors="coerce"
+    )
+    hospital_df_local = hospital_df_local.dropna(
+        subset=["name", "lat", "lon"]
+    ).reset_index(drop=True)
+
+    if hospital_df_local.empty:
+        warnings.append("沒有可顯示的醫院資料。")
+        return pd.DataFrame(), warnings
+
+    expected_cols = ["name", "level", "lat", "lon", "city", "region"]
+    for col in expected_cols:
+        if col not in hospital_df_local.columns:
+            hospital_df_local[col] = ""
+    hospital_df_local = hospital_df_local[expected_cols]
+    return hospital_df_local, warnings
+
+
+def _prepare_fire_station_dataframe(
+    station_df: pd.DataFrame | None,
+) -> tuple[pd.DataFrame, List[str]]:
+    """Load and standardize the fire station dataset."""
+    warnings: List[str] = []
+    if station_df is None:
+        try:
+            if not FIRE_STATION_DATA_PATH.exists():
+                warnings.append("找不到 data/fire-station.json，無法載入消防隊資料。")
+                return pd.DataFrame(), warnings
+            with FIRE_STATION_DATA_PATH.open("r", encoding="utf-8") as fp:
+                raw_data = json.load(fp)
+            station_df_local = pd.DataFrame(raw_data)
+        except (OSError, json.JSONDecodeError) as exc:
+            warnings.append(f"讀取 fire-station.json 時發生錯誤：{exc}")
+            return pd.DataFrame(), warnings
+    else:
+        station_df_local = station_df.copy()
+
+    if station_df_local.empty:
+        warnings.append("沒有可顯示的消防隊資料。")
+        return pd.DataFrame(), warnings
+
+    station_df_local = station_df_local.rename(
+        columns={
+            "分隊": "division",
+            "消防單位": "unit",
+            "地址": "address",
+            "電話": "phone",
+            "緯度": "lat",
+            "經度": "lon",
+        }
+    )
+
+    text_columns = ["division", "unit", "address", "phone"]
+    for col in text_columns:
+        if col not in station_df_local.columns:
+            station_df_local[col] = ""
+        station_df_local[col] = (
+            station_df_local[col]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+    station_df_local["lat"] = pd.to_numeric(
+        station_df_local.get("lat"), errors="coerce"
+    )
+    station_df_local["lon"] = pd.to_numeric(
+        station_df_local.get("lon"), errors="coerce"
+    )
+    station_df_local = station_df_local.dropna(subset=["lat", "lon"]).reset_index(drop=True)
+
+    if station_df_local.empty:
+        warnings.append("沒有可顯示的消防隊資料。")
+        return pd.DataFrame(), warnings
+
+    expected_cols = ["division", "unit", "address", "phone", "lat", "lon"]
+    for col in expected_cols:
+        if col not in station_df_local.columns:
+            station_df_local[col] = ""
+    station_df_local = station_df_local[expected_cols]
+    return station_df_local, warnings
+
+
+def _build_hospital_layers(
+    *,
+    hospital_df: pd.DataFrame | None = None,
+    include_hospitals: bool = True,
+    include_isochrones: bool = True,
+    isochrone_minutes: Sequence[int] = ISOCHRONE_DEFAULT_MINUTES,
+) -> tuple[MacroElement | None, List[folium.FeatureGroup], Dict[int, folium.FeatureGroup], List[str]]:
+    """Build hospital marker and isochrone feature groups without adding them to the map."""
+    if not include_hospitals and not include_isochrones:
+        return None, [], {}, []
+
+    hospital_df_local, warnings = _prepare_hospital_dataframe(hospital_df)
+    if hospital_df_local.empty:
+        return None, [], {}, warnings
+
+    valid_minutes: set[int] = set()
+    for minute in isochrone_minutes:
+        try:
+            minute_value = int(minute)
+        except (TypeError, ValueError):
+            continue
+        if minute_value > 0:
+            valid_minutes.add(minute_value)
+    valid_minutes &= set(ISOCHRONE_SUPPORTED_MINUTES)
+    normalized_minutes = tuple(sorted(valid_minutes))
+    if not normalized_minutes:
+        include_isochrones = False
+        normalized_minutes = ISOCHRONE_DEFAULT_MINUTES
+    render_minutes = tuple(sorted(set(normalized_minutes), reverse=True))
+
+    legend = _build_hospital_legend() if include_hospitals else None
+
+    hospital_groups: Dict[str, folium.FeatureGroup] = {}
+    hospital_group_counts: Dict[str, int] = {}
+    if include_hospitals:
+        for level in HOSPITAL_LEVEL_STYLES:
+            hospital_groups[level] = folium.FeatureGroup(name=f"{level}等級責任醫院", show=True)
+            hospital_group_counts[level] = 0
+        hospital_groups["__default__"] = folium.FeatureGroup(name="其他責任醫院", show=True)
+        hospital_group_counts["__default__"] = 0
+
+    cached_isochrones = _load_cached_isochrones() if include_isochrones else {}
+    iso_layers: Dict[int, folium.FeatureGroup] = {}
+    aggregated_isochrones: Dict[int, List[Dict[str, Any]]] = {
+        minute: [] for minute in render_minutes
+    }
+    missing_by_minute: Dict[int, List[str]] = {minute: [] for minute in render_minutes}
+
+    if include_isochrones and not cached_isochrones:
+        warnings.append(
+            "尚未找到預先建立的等時線資料（data/hospital_isochrones.geojson）。"
+            " 請先執行 `poetry run python scripts/cache_isochrones.py` 後再試。"
+        )
+        include_isochrones = False
+
+    for _, row in hospital_df_local.iterrows():
+        level = row["level"] or ""
+        style = HOSPITAL_LEVEL_STYLES.get(level, DEFAULT_HOSPITAL_STYLE)
+        slug = _slugify_hospital_name(row["name"])
+
+        if include_hospitals:
+            group_key = level if level in hospital_groups else "__default__"
+            target_group = hospital_groups[group_key]
+
+            icon_html = (
+                '<div style="display:flex;align-items:center;justify-content:center;'
+                f'width:32px;height:32px;border-radius:50%;background:{style["color"]};'
+                'border:2px solid #ffffff;box-shadow:0 0 6px rgba(0,0,0,0.25);">'
+                f'<span style="font-size:18px;line-height:1;">{style["emoji"]}</span>'
+                "</div>"
+            )
+            popup_html = f"""
+                <div style="width:220px;">
+                    <h4 style="margin:0 0 6px 0;font-size:15px;">{row['name']}</h4>
+                    <table style="width:100%;font-size:13px;">
+                        <tr><td style="width:72px;"><b>分級</b></td><td>{row['level'] or '—'}</td></tr>
+                        <tr><td><b>縣市</b></td><td>{row['city'] or '—'}</td></tr>
+                        <tr><td><b>區域</b></td><td>{row['region'] or '—'}</td></tr>
+                        <tr><td><b>座標</b></td><td>{row['lat']:.5f}, {row['lon']:.5f}</td></tr>
+                    </table>
+                </div>
+            """
+
+            tooltip_level_indicator_dict = {
+                "重度": "🔴",
+                "中度": "🟡",
+                "一般": "🟢",
+            }
+            
+
+            folium.Marker(
+                location=[row["lat"], row["lon"]],
+                icon=folium.DivIcon(html=icon_html, icon_size=(32, 32), icon_anchor=(16, 16)),
+                tooltip=f"{tooltip_level_indicator_dict.get(row['level'], '🔘')} {row['name']}",
+                popup=folium.Popup(popup_html, max_width=280),
+            ).add_to(target_group)
+            hospital_group_counts[group_key] += 1
+
+        if include_isochrones:
+            hospital_iso = cached_isochrones.get(slug, {})
+            for minute in render_minutes:
+                minute_features = hospital_iso.get(minute, [])
+                if minute_features:
+                    aggregated_isochrones[minute].extend(minute_features)
+                else:
+                    missing_by_minute.setdefault(minute, []).append(row["name"])
+
+    if include_isochrones:
+        for minute in render_minutes:
+            minute_features = aggregated_isochrones.get(minute, [])
+            if not minute_features:
+                continue
+            union_features = _union_geojson_features(minute_features)
+            if not union_features:
+                continue
+            layer = folium.FeatureGroup(
+                name=f"{minute} 分等時線",
+                # show=(minute == min(normalized_minutes)),
+                show=True,
+            )
+            style_cfg = ISOCHRONE_STYLE_BY_MINUTE.get(
+                minute,
+                {"color": "#3182bd", "fillColor": "#9ecae1", "fillOpacity": 0.18},
+            )
+            for feature in union_features:
+                geojson = folium.GeoJson(
+                    feature,
+                    style_function=_geojson_style(style_cfg),
+                    name=f"{minute} 分涵蓋區域",
+                )
+                geojson.add_child(folium.Tooltip(f"{minute} 分涵蓋區域"))
+                geojson.add_to(layer)
+            iso_layers[minute] = layer
+
+        for minute, missing_names in missing_by_minute.items():
+            if missing_names:
+                hospitals_str = "、".join(sorted(set(missing_names)))
+                warnings.append(
+                    f"下列醫院缺少 {minute} 分等時線資料：{hospitals_str}"
+                )
+
+    hospital_groups_list: List[folium.FeatureGroup] = []
+    if include_hospitals:
+        for level_key, group in hospital_groups.items():
+            if hospital_group_counts.get(level_key, 0) > 0:
+                hospital_groups_list.append(group)
+
+    return legend, hospital_groups_list, iso_layers, warnings
+
+
+def _build_fire_station_layers(
+    *,
+    station_df: pd.DataFrame | None = None,
+    include_fire_stations: bool = True,
+) -> tuple[List[folium.FeatureGroup], List[str]]:
+    """Build fire station feature groups."""
+    if not include_fire_stations:
+        return [], []
+
+    station_df_local, warnings = _prepare_fire_station_dataframe(station_df)
+    if station_df_local.empty:
+        return [], warnings
+
+    divisions = list(dict.fromkeys(station_df_local["division"]))
+    division_styles: Dict[str, str] = {}
+    for idx, division in enumerate(divisions):
+        division_styles[division] = FIRE_STATION_COLORS[idx % len(FIRE_STATION_COLORS)]
+
+    division_groups: Dict[str, folium.FeatureGroup] = {}
+    division_counts: Dict[str, int] = {}
+    for division in divisions:
+        group = folium.FeatureGroup(name=f"{division}消防隊", show=True)
+        division_groups[division] = group
+        division_counts[division] = 0
+
+    for _, row in station_df_local.iterrows():
+        division = row["division"] or "消防隊"
+        color = division_styles.get(division, "#d95f0e")
+        group = division_groups.setdefault(division, folium.FeatureGroup(name=f"{division}消防隊", show=True))
+        division_counts[division] = division_counts.get(division, 0) + 1
+
+        icon_html = (
+            '<div style="display:flex;align-items:center;justify-content:center;'
+            f'width:28px;height:28px;border-radius:50%;background:{color};'
+            'border:2px solid #ffffff;box-shadow:0 0 6px rgba(0,0,0,0.25);">'
+            f'<span style="font-size:17px;line-height:1;">{FIRE_STATION_EMOJI}</span>'
+            "</div>"
+        )
+        popup_html = f"""
+            <div style="width:220px;">
+                <h4 style="margin:0 0 6px 0;font-size:15px;">{row['unit'] or row['division']}</h4>
+                <table style="width:100%;font-size:13px;">
+                    <tr><td style="width:72px;"><b>分隊</b></td><td>{row['division'] or '—'}</td></tr>
+                    <tr><td><b>地址</b></td><td>{row['address'] or '—'}</td></tr>
+                    <tr><td><b>電話</b></td><td>{row['phone'] or '—'}</td></tr>
+                    <tr><td><b>座標</b></td><td>{row['lat']:.5f}, {row['lon']:.5f}</td></tr>
+                </table>
+            </div>
+        """
+
+        folium.Marker(
+            location=[row["lat"], row["lon"]],
+            icon=folium.DivIcon(html=icon_html, icon_size=(28, 28), icon_anchor=(14, 14)),
+            tooltip=f"{row['unit'] or row['division']}",
+            popup=folium.Popup(popup_html, max_width=280),
+        ).add_to(group)
+
+    fire_groups: List[folium.FeatureGroup] = []
+    for division, group in division_groups.items():
+        if division_counts.get(division, 0) > 0:
+            fire_groups.append(group)
+
+    return fire_groups, warnings
+
+    # hospital_df_local, prep_warnings = _prepare_hospital_dataframe(hospital_df)
+    # warnings.extend(prep_warnings)
+    # if hospital_df_local.empty:
+    #     return warnings
+
+    # # Normalize minutes input
+    # valid_minutes: set[int] = set()
+    # for minute in isochrone_minutes:
+    #     try:
+    #         minute_value = int(minute)
+    #     except (TypeError, ValueError):
+    #         continue
+    #     if minute_value > 0:
+    #         valid_minutes.add(minute_value)
+    # valid_minutes &= set(ISOCHRONE_SUPPORTED_MINUTES)
+    # normalized_minutes = tuple(sorted(valid_minutes))
+    # if not normalized_minutes:
+    #     include_isochrones = False
+    #     normalized_minutes = ISOCHRONE_DEFAULT_MINUTES
+    # render_minutes = tuple(sorted(set(normalized_minutes), reverse=True))
+
+    # if include_hospitals:
+    #     map_obj.get_root().add_child(_build_hospital_legend())
+
+    # level_groups: Dict[str, folium.FeatureGroup] = {}
+    # level_counts: Dict[str, int] = {}
+    # if include_hospitals:
+    #     for level in HOSPITAL_LEVEL_STYLES:
+    #         group = folium.FeatureGroup(name=f"{level}等級責任醫院", show=True)
+    #         level_groups[level] = group
+    #         level_counts[level] = 0
+    #     default_group = folium.FeatureGroup(name="其他責任醫院", show=True)
+    #     level_groups["__default__"] = default_group
+    #     level_counts["__default__"] = 0
+
+def _build_hospital_legend() -> MacroElement:
+    """Create a legend element describing hospital level color coding."""
+    legend_rows = []
+    for level, style in HOSPITAL_LEVEL_STYLES.items():
+        legend_rows.append(
+            f"""
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+                <div style="width:22px;height:22px;border-radius:50%;background:{style['color']};
+                            display:flex;align-items:center;justify-content:center;
+                            color:#ffffff;font-size:14px;">{style['emoji']}</div>
+                <span style="font-size:12px;color:#222222;">{level}</span>
+            </div>
+            """
+        )
+
+    legend_rows.append(
+        f"""
+        <div style="display:flex;align-items:center;gap:8px;">
+            <div style="width:22px;height:22px;border-radius:50%;background:{DEFAULT_HOSPITAL_STYLE['color']};
+                        display:flex;align-items:center;justify-content:center;
+                        color:#ffffff;font-size:14px;">{DEFAULT_HOSPITAL_STYLE['emoji']}</div>
+            <span style="font-size:12px;color:#222222;">其他</span>
+        </div>
+        """
+    )
+
+    template = Template(
+        f"""
+        {{% macro html(this, kwargs) %}}
+        <div style="
+            position: fixed;
+            bottom: 28px;
+            left: 28px;
+            z-index: 9999;
+            background: rgba(255, 255, 255, 0.92);
+            padding: 12px 16px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+            font-family: 'Arial', sans-serif;
+        ">
+            <div style="font-weight: 600; margin-bottom: 8px; font-size: 13px;">
+                急救責任醫院分級
+            </div>
+            {''.join(legend_rows)}
+        </div>
+        {{% endmacro %}}
+        """
+    )
+    macro = MacroElement()
+    macro._template = template
+    return macro
+
+
+def _geojson_style(style: Dict[str, Any]):
+    """Return a function compatible with Folium GeoJson style_function."""
+
+    def fn(_: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "color": style.get("color", "#2c7fb8"),
+            "weight": style.get("weight", 2),
+            "fillOpacity": style.get("fillOpacity", 0.2),
+            "fillColor": style.get("fillColor", style.get("color", "#2c7fb8")),
+        }
+
+    return fn
+
 
 def geocode_address(address: str) -> tuple:
     """
@@ -88,7 +689,13 @@ def geocode_address(address: str) -> tuple:
 
 def create_heatmap(
     district_df: pd.DataFrame,
-) -> folium.Map:
+    *,
+    hospital_df: pd.DataFrame | None = None,
+    include_hospitals: bool = True,
+    include_isochrones: bool = True,
+    include_fire_stations: bool = False,
+    isochrone_minutes: Sequence[int] = ISOCHRONE_DEFAULT_MINUTES,
+) -> tuple[folium.Map, List[str]]:
     """
     Create an interactive heatmap with markers
     
@@ -100,40 +707,17 @@ def create_heatmap(
             - avg_response_seconds
     
     Returns:
-        folium.Map object
+        Tuple[folium.Map, List[str]]: map object and warnings encountered while building overlays.
     """
-    # Create base map
-    m = folium.Map(
-        location=DEFAULT_MAP_CENTER,
-        zoom_start=DEFAULT_MAP_ZOOM,
-        tiles=None,
-        control_scale=True
-    )
+    warnings: List[str] = []
 
-    # Additional base layers for aesthetics
-    folium.TileLayer(
-        tiles='https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
-        attr='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, &copy; <a href="https://carto.com/attributions">CARTO</a>',
-        name='CartoDB Positron',
-        control=True
-    ).add_to(m)
-    folium.TileLayer(
-        tiles='OpenStreetMap',
-        name='OpenStreetMap',
-        attr='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-    ).add_to(m)
-    folium.TileLayer(
-        tiles='https://stamen-tiles-{s}.a.ssl.fastly.net/toner/{z}/{x}/{y}.png',
-        name='Stamen Toner',
-        attr='Map tiles by <a href="http://stamen.com">Stamen Design</a>, under <a href="http://creativecommons.org/licenses/by/3.0">CC BY 3.0</a>. Data by <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>, under ODbL.'
-    ).add_to(m)
-    MiniMap(toggle_display=True).add_to(m)
-    Fullscreen(position='topleft').add_to(m)
+    # Create base map
+    m = _create_base_map()
 
     required_columns = {'incident_district', 'case_count'}
     if not required_columns.issubset(district_df.columns):
         folium.LayerControl(collapsed=False).add_to(m)
-        return m
+        return m, warnings
 
     # Only consider districts with known coordinates
     df_geo = district_df[
@@ -141,7 +725,7 @@ def create_heatmap(
     ].copy()
     if df_geo.empty:
         folium.LayerControl(collapsed=False).add_to(m)
-        return m
+        return m, warnings
 
     df_geo['lat'] = df_geo['incident_district'].map(
         lambda d: DISTRICT_COORDINATES[d][0]
@@ -159,38 +743,62 @@ def create_heatmap(
         lambda v: (v / 60.0) if pd.notna(v) else None
     )
 
-    # Heatmap data uses weight per district instead of every case
+    heat_layer = None
+    color_scale: LinearColormap | None = None
+    circle_rows: List[Dict[str, Any]] = []
+    max_count_root = 1.0
+    heat_gradient = {0.3: '#74add1', 0.6: '#fdae61', 0.8: '#f46d43', 1.0: '#d73027'}
+
     heat_data = df_geo[['lat', 'lon', 'case_count']].values.tolist()
     if heat_data:
-        HeatMap(
+        heat_layer = HeatMap(
             heat_data,
+            control=False,
             radius=35,
             blur=28,
             max_zoom=13,
-            gradient={0.3: '#74add1', 0.6: '#fdae61', 0.8: '#f46d43', 1.0: '#d73027'}
-        ).add_to(m)
-
-        # Color scale for circle markers (lighter for少量, darker for大量)
+            gradient=heat_gradient,
+        )
         min_count = float(df_geo['case_count'].min())
         max_count = float(df_geo['case_count'].max())
         if min_count == max_count:
-            # Expand range slightly to avoid degenerate colormap
             min_count -= 1
             max_count += 1
         color_scale = LinearColormap(
-            # colors=['#2b8cbe', '#7fcdbb', '#edf8b1', '#fc8d59', '#d7301f'],
             colors=["#31a354", "#006837", "#ffffb2", "#fe9929", "#d95f0e"],
             vmin=min_count,
             vmax=max_count,
             caption="行政區案件數",
         )
-        color_scale.add_to(m)
+        circle_rows = df_geo.to_dict("records")
+        max_count_root = math.sqrt(float(df_geo['case_count'].max())) if max_count > 0 else 1.0
 
-        # Add one marker per district summarizing key metrics
-        max_count_root = (
-            math.sqrt(float(df_geo['case_count'].max())) if max_count > 0 else 1.0
+    legend = None
+    hospital_groups: List[folium.FeatureGroup] = []
+    iso_layers: Dict[int, folium.FeatureGroup] = {}
+    fire_station_groups: List[folium.FeatureGroup] = []
+    if include_hospitals or include_isochrones:
+        legend, hospital_groups, iso_layers, overlay_warnings = _build_hospital_layers(
+            hospital_df=hospital_df,
+            include_hospitals=include_hospitals,
+            include_isochrones=include_isochrones,
+            isochrone_minutes=isochrone_minutes,
         )
-        for _, row in df_geo.iterrows():
+        warnings.extend(overlay_warnings)
+        if legend:
+            m.get_root().add_child(legend)
+        for minute in sorted(iso_layers.keys(), reverse=True):
+            iso_layers[minute].add_to(m)
+    if include_fire_stations:
+        fire_station_groups, fire_warnings = _build_fire_station_layers()
+        warnings.extend(fire_warnings)
+
+    if heat_layer:
+        heat_layer.add_to(m)
+    if color_scale:
+        color_scale.add_to(m)
+    if circle_rows and color_scale:
+        for row in circle_rows:
             popup_html = """
             <div style=\"width: 260px;\">
                 <h4 style=\"margin-bottom:6px;\">{district}</h4>
@@ -209,7 +817,6 @@ def create_heatmap(
                 avg_response=avg_response_disp,
             )
 
-            # Scale circle radius by square root to avoid極端差距
             radius = (
                 8 + 20 * (math.sqrt(row['case_count']) / max_count_root)
                 if max_count_root
@@ -229,10 +836,7 @@ def create_heatmap(
                 popup=folium.Popup(popup_html, max_width=320),
             ).add_to(m)
 
-            # Add count label at circle center
-            # font_size = max(11, min(22, radius * 1.1))
             font_size = 12
-
             label_html = (
                 '<div style="display:flex;align-items:center;justify-content:center;'
                 'transform: translate(0%, 0%);'
@@ -250,8 +854,42 @@ def create_heatmap(
                 ),
             ).add_to(m)
 
+    for group in fire_station_groups:
+        group.add_to(m)
+
+    for group in hospital_groups:
+        group.add_to(m)
+
     folium.LayerControl(collapsed=False).add_to(m)
-    return m
+    return m, warnings
+
+
+def create_hospital_response_map(
+    hospital_df: pd.DataFrame | None = None,
+    *,
+    include_isochrones: bool = True,
+    isochrone_minutes: Sequence[int] = ISOCHRONE_DEFAULT_MINUTES,
+) -> Tuple[folium.Map, List[str]]:
+    """
+    Create a map visualising emergency responsibility hospitals and travel-time isochrones.
+
+    Returns the constructed Folium map and a list of warning messages (if any).
+    """
+    hospital_map = _create_base_map()
+    legend, hospital_groups, iso_layers, warnings = _build_hospital_layers(
+        hospital_df=hospital_df,
+        include_hospitals=True,
+        include_isochrones=include_isochrones,
+        isochrone_minutes=isochrone_minutes,
+    )
+    if legend:
+        hospital_map.get_root().add_child(legend)
+    for minute in sorted(iso_layers.keys(), reverse=True):
+        iso_layers[minute].add_to(hospital_map)
+    for group in hospital_groups:
+        group.add_to(hospital_map)
+    folium.LayerControl(collapsed=False).add_to(hospital_map)
+    return hospital_map, warnings
 
 
 def create_time_animation_map(daily_df: pd.DataFrame) -> go.Figure:
