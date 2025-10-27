@@ -13,6 +13,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
 DB_DIR = PROJECT_ROOT / "database"
 VECTOR_DB_DIR = PROJECT_ROOT / "vector_db"
+DTM_DIR = DATA_DIR / "2024年版全臺灣20公尺網格數值地形模型DTM資料"
 
 # Ensure directories exist
 DB_DIR.mkdir(exist_ok=True)
@@ -53,6 +54,21 @@ OPENROUTESERVICE_BASE_URL = (
     .strip()
     .rstrip("/")
 )
+
+# Elevation / DTM Configuration
+DEFAULT_DTM_FILENAME = "不分幅_台灣20MDEM(2024).tif"
+DTM_TIF_PATH = Path(
+    os.getenv("DTM_TIF_PATH", str(DTM_DIR / DEFAULT_DTM_FILENAME))
+).expanduser()
+DTM_SAMPLE_INTERVAL_M = float(os.getenv("DTM_SAMPLE_INTERVAL_M", "50"))
+
+# Geocoder Configuration
+GEOCODER_PROVIDER = os.getenv("GEOCODER_PROVIDER", "nominatim").strip().lower()
+GEOCODER_USER_AGENT = os.getenv(
+    "GEOCODER_USER_AGENT", "aero-bloodchain-uav-profile"
+).strip()
+GEOCODER_TIMEOUT = float(os.getenv("GEOCODER_TIMEOUT", "5"))
+GEOCODER_RATE_LIMIT_SECONDS = float(os.getenv("GEOCODER_RATE_LIMIT_SECONDS", "1"))
 
 # Embedding Configuration
 CHUNK_SIZE = 1000

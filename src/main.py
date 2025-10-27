@@ -24,6 +24,9 @@ from visualization.map_view import (
     create_time_animation_map,
 )
 from visualization.charts import create_statistics_charts
+from visualization.elevation_profile_page import (
+    render_uav_elevation_profile_page,
+)
 from analytics.data_qa import DataQABot
 from forms.generator import FormGenerator
 
@@ -550,6 +553,7 @@ def main():
         [
             "📋 緊急救護問答",
             "🗺️ 地理視覺化地圖",
+            "✈️ 無人機直線剖面",
             "📊 數據分析問答",
             "📄 行政表單產生"
         ]
@@ -562,6 +566,8 @@ def main():
         page_manual_qa()
     elif page == "🗺️ 地理視覺化地圖":
         page_maps()
+    elif page == "✈️ 無人機直線剖面":
+        render_uav_elevation_profile_page()
     elif page == "📊 數據分析問答":
         page_analytics()
     elif page == "📄 行政表單產生":
