@@ -6,12 +6,13 @@
 
 ## 專案簡介
 
-本系統提供以下四大核心功能：
+本系統提供以下五大核心功能：
 
 1. **📋 緊急救護程序問答機器人** - 基於新北市政府消防局緊急傷病患作業程序手冊的 AI 問答系統
 2. **🗺️ 地理視覺化地圖** - 互動式地圖展示急救案件分布、熱力圖與時間序列動畫
-3. **📊 數據分析問答** - 使用自然語言查詢急救案件數據，自動產生圖表
-4. **📄 行政表單產生器** - 快速產生 PDF/Excel 格式的行政文書（骨架實作）
+3. **✈️ 無人機直線剖面分析** - 使用 20m DTM 估算無人機直線航線的高度變化、距離與預估飛行時間
+4. **📊 數據分析問答** - 使用自然語言查詢急救案件數據，自動產生圖表
+5. **📄 行政表單產生器** - 快速產生 PDF/Excel 格式的行政文書（骨架實作）
 
 > 新增：可透過環境變數設定簡易帳號密碼登入，保護 Streamlit 介面。
 
@@ -80,6 +81,19 @@ APP_LOGIN_PASSWORD=
 # Optional: OpenRouteService 等時線 API
 OPENROUTESERVICE_API_KEY=
 # OPENROUTESERVICE_BASE_URL=https://api.openrouteservice.org
+
+# UAV elevation profile settings
+# 預設會指向 data/ 目錄內的 2024 年 20m DTM GeoTIFF
+DTM_TIF_PATH=
+# 取樣間距（公尺），空白代表使用預設值 50
+DTM_SAMPLE_INTERVAL_M=
+
+# Google Maps Geocoding 設定（地址輸入模式必填）
+GOOGLE_MAPS_API_KEY=
+# 可覆寫 Endpoint、逾時或節流秒數
+GOOGLE_GEOCODE_ENDPOINT=
+GEOCODER_TIMEOUT=
+GEOCODER_RATE_LIMIT_SECONDS=
 ```
 
 或者，使用 Streamlit secrets (推薦用於生產環境)：
@@ -96,6 +110,8 @@ OPENAI_API_KEY = "your_openai_api_key_here"
 # APP_LOGIN_USERNAME = "admin"
 # APP_LOGIN_PASSWORD = "changeme"
 ```
+
+> UAV 直線剖面頁面需要 2024 年 20 公尺 DTM GeoTIFF。若已將官方檔案放在 `data/2024年版全臺灣20公尺網格數值地形模型DTM資料/不分幅_台灣20MDEM(2024).tif`，可直接使用預設值。若路徑不同，請透過 `DTM_TIF_PATH` 指定完整路徑，亦可調整 `DTM_SAMPLE_INTERVAL_M` 取樣間距。地址輸入模式會透過 Google Maps Geocoding API 查詢座標，請在 `.env` 設定 `GOOGLE_MAPS_API_KEY`，並視需求調整 `GOOGLE_GEOCODE_ENDPOINT`、`GEOCODER_TIMEOUT` 或 `GEOCODER_RATE_LIMIT_SECONDS`。
 
 ### 5. 預先建立 OpenRouteService 等時線快取（建議）
 
@@ -219,7 +235,34 @@ poetry run streamlit run src/main.py --server.port 80 --server.address 0.0.0.0
 - 僅顯示危急個案
 - 側邊欄可勾選是否顯示責任醫院、消防分隊與 30/60 分交通等時線，快速對照緊急資源覆蓋情況
 
-### 3. 數據分析問答
+### 3. 無人機直線剖面分析
+
+**資料來源**：
+
+- 內建支援 2024 年 20 公尺網格數值地形模型 (DTM) GeoTIFF
+- 可透過 `DTM_TIF_PATH` 指向不同的 GeoTIFF
+
+**輸入方式**：
+
+- 直接輸入起、終點經緯度
+- 輸入地址並由 Google Maps Geocoding API 查詢座標（需 `GOOGLE_MAPS_API_KEY`）
+- 在地圖上點選兩個位置（支援拖曳調整與重新選點）
+
+**輸出內容**：
+
+- 水平直線距離、總爬升/下降量、3D 路徑估算
+- 依照無人機平均速度計算的預估飛行時間
+- 距離對應地面高度的剖面圖（顯示最高/最低點）
+- 剖面採樣資料表與 CSV 下載
+
+**注意事項**：
+
+- 建議將官方 DTM 檔案放在 `data/2024年版全臺灣20公尺網格數值地形模型DTM資料` 供預設路徑使用
+- 若採用其他 GeoTIFF，請先確認座標系統 (CRS) 已寫入檔案（預期值：EPSG:3826）
+- 地圖選點會自動限制為兩個節點，可透過側邊按鈕清除重新選擇
+- 座標或地址模式套用成功後，系統會自動顯示預覽地圖與標記，方便確認輸入位置
+
+### 4. 數據分析問答
 
 **技術實現**：
 
@@ -247,7 +290,7 @@ poetry run streamlit run src/main.py --server.port 80 --server.address 0.0.0.0
 - 一般建議 `OPENAI_MODEL=gpt-4o-mini`
 - 若要使用 reasoning 模型（如 gpt-5/o-*），可保留 `OPENAI_MODEL`，或改設 `SQL_QA_MODEL` 專供 SQL 鏈使用；程式已內建相容層處理 stop 參數差異。
 
-### 4. 行政表單產生器
+### 5. 行政表單產生器
 
 **技術實現**：
 
@@ -301,8 +344,12 @@ aero-bloodchain/
     │   └── embeddings.py      # 向量儲存
     ├── visualization/         # 視覺化模組
     │   ├── __init__.py
+    │   ├── elevation_profile_page.py  # 無人機剖面頁面
     │   ├── map_view.py        # 地圖視覺化
     │   └── charts.py          # 統計圖表
+    ├── geo/                   # 地理空間工具
+    │   ├── __init__.py
+    │   └── elevation_profile.py  # 剖面取樣與指標計算
     ├── analytics/             # 分析模組
     │   ├── __init__.py
     │   ├── data_qa.py         # 數據問答
