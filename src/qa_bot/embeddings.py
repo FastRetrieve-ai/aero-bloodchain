@@ -257,18 +257,46 @@ class VectorStoreManager:
         return sorted(best.values(), key=lambda d: d["score"], reverse=True)
 
     def read_page_markdown(self, manual_dir: Path, page_number: int | str) -> str:
-        """Read full markdown content of a page by number.
+        """Read full markdown content of a page by exact numeric page match.
 
-        Looks for files with first integer occurrence matching page_number.
+        - Parse the requested page number to an integer (e.g., '002' -> 2).
+        - Iterate all `*.md` files, infer each file's page number via `_infer_page_number`.
+        - Return the text of the file whose parsed number equals the target.
+        - Avoid substring matching to prevent '2' matching '102'.
         """
         manual_dir = Path(manual_dir)
-        page_number = str(page_number)
+
+        # Normalize target page number to integer
+        try:
+            import re
+            m = re.search(r"(\d+)", str(page_number))
+            if not m:
+                return ""
+            target = int(m.group(1))
+        except Exception:
+            return ""
+
         candidates = sorted([p for p in manual_dir.glob("*.md") if p.is_file()])
+
+        # Exact numeric match using inferred page numbers
         for p in candidates:
-            if page_number in p.stem or page_number.zfill(3) in p.stem:
+            parsed = self._infer_page_number(p)
+            if parsed is not None and parsed == target:
                 try:
                     return p.read_text(encoding="utf-8", errors="ignore")
                 except Exception:
-                    pass
-        # As a fallback, return empty string
+                    break
+
+        # Conservative fallback: try equality on stem with zero-padded forms
+        stem_target = str(target)
+        padded = stem_target.zfill(3)
+        for p in candidates:
+            st = p.stem
+            if st == stem_target or st == padded:
+                try:
+                    return p.read_text(encoding="utf-8", errors="ignore")
+                except Exception:
+                    break
+
+        # Nothing found
         return ""
