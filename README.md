@@ -196,16 +196,32 @@ poetry run streamlit run src/main.py --server.port 80 --server.address 0.0.0.0
 
 **技術實現**：
 
-- 使用 LangChain RAG (Retrieval-Augmented Generation) 架構
-- 將救護手冊切分成語意區塊，並建立向量嵌入
-- 使用 OpenAI Embeddings + GPT-4 進行語意搜尋與回答
-- 自動引用相關章節編號 (G1-G7, M1-M10, S1-S15 等)
+- 使用 LangChain RAG (Retrieval‑Augmented Generation) 架構
+- 手冊以「逐頁 markdown」管理，索引時寫入頁碼與檔案路徑
+- 檢索先取前 20 個最相近 chunk，再擴展為「對應整頁」原文送入 LLM
+- 回答附標準化引用（如 p.004、p.005），只顯示本輪回答有提到的頁碼
+- 介面可展開每個引用頁的 markdown 頁面預覽，並提供完整 PDF 下載
 
 **使用方式**：
 
-1. 選擇「緊急救護問答」功能
-2. 輸入關於救護程序的問題
-3. 系統會參考手冊內容回答，並引用章節來源
+1. 進入「緊急救護問答」分頁
+2. 輸入問題（例：G2 現場評估流程是什麼？）
+3. 系統以整頁原文作為依據回答；底部顯示此輪回答實際引用的頁碼（可點擊展開預覽）
+4. 如更動手冊內容，可點「重建向量索引」或重新整理頁面讓系統自動偵測
+
+**資料結構（RAG 原文）**：
+
+- 將完整 PDF 與每一頁的 markdown 放在：`data/emergency-patient-rescue-process/`
+- 檔案結構示意：
+  - `data/emergency-patient-rescue-process/emergency-patient-rescue-process.pdf`
+  - `data/emergency-patient-rescue-process/001.md`
+  - `data/emergency-patient-rescue-process/002.md`
+  - … 每頁一檔（檔名含頁碼即可，如 `page-12.md` 亦可）
+- 首次或資料改動後，系統會偵測變更並重建索引；也可手動點「重建向量索引」
+
+**環境變數**：
+
+- `EMERGENCY_MANUAL_DIR`（選填）覆寫資料夾位置，預設 `data/emergency-patient-rescue-process`
 
 **範例問題**：
 
@@ -337,7 +353,11 @@ aero-bloodchain/
 │   ├── 2024-cases.xlsx
 │   ├── 2025-cases.xlsx
 │   ├── sample-2025-cases.csv
-│   └── emergency-patient-rescue-process.md
+│   └── emergency-patient-rescue-process/      # 手冊原文（逐頁 markdown）
+│       ├── emergency-patient-rescue-process.pdf
+│       ├── 001.md
+│       ├── 002.md
+│       └── ...
 ├── database/                   # SQLite 資料庫檔案 (自動生成)
 │   └── bloodchain.db
 ├── vector_db/                  # 向量資料庫檔案 (自動生成)

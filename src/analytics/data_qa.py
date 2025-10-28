@@ -4,6 +4,8 @@ Data Q&A Bot using SQL Agent for querying emergency case database
 from typing import Dict, Any
 from types import MethodType
 from functools import wraps
+from datetime import datetime
+
 import re
 import pandas as pd
 import plotly.graph_objects as go
@@ -57,6 +59,7 @@ class DataQABot:
             return_sql=True,  # Return SQL only, don't execute
             prompt=prompt
         )
+        self.today = datetime.now().strftime('%Y-%m-%d')
         # Neutralize built-in top_k limit to avoid incorrect counts with big data
         try:
             self.sql_chain.top_k = 100000000  # effectively no LIMIT in prompts
@@ -112,6 +115,7 @@ class DataQABot:
                 "先用一句話簡潔說明，再用數個重點條列，必要時加入數字與單位。條列數量不超過 10 個。"
             )
             user_msg = (
+                f"今天的日期是：\n{self.today}\n\n"
                 "# 使用者問題:\n'" + (question or "") + "'\n\n" +
                 (f"# SQL 查詢:\n{sql_query}\n\n" if sql_query else "") +
                 ("# SQL 結果:\n") +
