@@ -82,5 +82,16 @@ CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
 EMBEDDING_MODEL = "text-embedding-3-large"
 
-# Manual file path
+# Emergency manual (RAG) paths
+# New structure: each manual page is a markdown file under this folder
+# A complete PDF can also be present for download/preview
+EMERGENCY_MANUAL_DIR = Path(
+    os.getenv(
+        "EMERGENCY_MANUAL_DIR",
+        str(DATA_DIR / "emergency-patient-rescue-process"),
+    )
+)
+EMERGENCY_MANUAL_PDF = EMERGENCY_MANUAL_DIR / "emergency-patient-rescue-process.pdf"
+
+# Backward-compatibility: previous single-markdown path (unused in new flow)
 EMERGENCY_MANUAL_PATH = DATA_DIR / "emergency-patient-rescue-process.md"

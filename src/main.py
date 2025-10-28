@@ -16,6 +16,7 @@ from config import (
     OPENAI_API_KEY,
     APP_LOGIN_USERNAME,
     APP_LOGIN_PASSWORD,
+    EMERGENCY_MANUAL_PDF,
 )
 from database.db_manager import DatabaseManager
 from qa_bot.manual_qa import ManualQABot
@@ -61,81 +62,119 @@ def check_api_key():
 
 
 def page_manual_qa():
-    """Page 1: Emergency Manual Q&A Bot"""
+    """Page 1: Emergency Manual Q&A Bot (chat UI aligned with analytics)."""
     st.title("📋 緊急救護程序問答系統")
-    st.markdown("根據新北市政府消防局緊急傷病患作業程序手冊回答問題")
-    
-    # Initialize QA bot
-    if 'qa_bot' not in st.session_state:
+    st.markdown("根據《113年緊急傷病患救護流程手冊》檢索回答，並附上可點擊引用頁碼。")
+
+    if EMERGENCY_MANUAL_PDF.exists():
         try:
-            st.session_state.qa_bot = ManualQABot()
-            with st.spinner("載入緊急救護手冊..."):
-                st.session_state.qa_bot.load_manual()
-            st.success("✅ 手冊載入完成")
+            with open(EMERGENCY_MANUAL_PDF, "rb") as f:
+                st.download_button(
+                    label="📄 下載完整手冊 PDF",
+                    data=f.read(),
+                    file_name=EMERGENCY_MANUAL_PDF.name,
+                    mime="application/pdf",
+                )
+        except Exception:
+            pass
+
+    # Initialize bot and index
+    if "manual_bot" not in st.session_state:
+        try:
+            st.session_state.manual_bot = ManualQABot()
+            with st.spinner("檢查 / 建置手冊向量索引…"):
+                chunks = st.session_state.manual_bot.build_or_load_index()
+            st.success(f"✅ 手冊索引就緒（{chunks} 個片段）")
+            st.session_state.manual_messages = []  # [{role, content, citations}]
         except Exception as e:
-            st.error(f"載入手冊時發生錯誤：{e}")
+            st.error(f"初始化手冊問答系統時發生錯誤：{e}")
             return
-    
-    # Chat interface
-    if 'chat_history' not in st.session_state:
-        st.session_state.chat_history = []
 
-    # Display chat history using Streamlit chat layout
-    for entry in st.session_state.chat_history:
-        if isinstance(entry, dict):
-            question = entry.get("question", "")
-            answer = entry.get("answer", "")
-            sources = entry.get("sources", [])
-        else:
-            # Backward compatibility for tuple-based history
-            question, answer = entry
-            sources = []
+    # Controls
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button("🔁 重建向量索引"):
+            try:
+                with st.spinner("重建中…"):
+                    chunks = st.session_state.manual_bot.build_or_load_index()
+                st.success(f"已完成重建（{chunks} 個片段）")
+            except Exception as e:
+                st.error(f"重建索引失敗：{e}")
+    with col_b:
+        if st.button("🗑️ 清除對話"):
+            st.session_state.manual_messages = []
+            st.session_state.manual_bot.clear_history()
+            st.rerun()
 
+    # Helper: sort citations by numeric page number
+    def _page_sort_key(c: dict) -> int:
+        try:
+            return int(str(c.get("page_number", "")).strip())
+        except Exception:
+            return 10**9
+
+    # Render chat history
+    for msg in st.session_state.manual_messages:
+        role = msg.get("role", "assistant")
+        with st.chat_message(role):
+            st.markdown(msg.get("content", ""))
+            if role == "assistant":
+                citations = msg.get("citations") or []
+                if citations:
+                    st.caption("引用來源（點擊展開內容頁面）")
+                    for c in sorted(citations, key=_page_sort_key):
+                        pn = c.get("page_number")
+                        label = f"p.{str(pn).zfill(3)}"
+                        with st.expander(label):
+                            # Show markdown page content as ground truth snippet
+                            try:
+                                page_md = st.session_state.manual_bot.vector_store.read_page_markdown(
+                                    st.session_state.manual_bot.manual_dir, pn
+                                )
+                                st.markdown(page_md)
+                            except Exception:
+                                st.info("找不到該頁的 markdown 內容。")
+
+    # Chat input
+    prompt = st.chat_input("輸入要查詢的手冊內容…")
+    if prompt:
+        # Echo user
+        st.session_state.manual_messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
-            st.markdown(question)
+            st.markdown(prompt)
 
+        # Ask bot
         with st.chat_message("assistant"):
-            st.markdown(answer)
-            if sources:
-                st.caption("參考章節")
-                for source in sources:
-                    section = source.get("section") or "未知章節"
-                    similarity = source.get("similarity")
-                    excerpt = source.get("content", "")
-                    if similarity is not None:
-                        st.markdown(f"- **{section}** · 相似度 {similarity:.2f}")
-                    else:
-                        st.markdown(f"- **{section}**")
-                    if excerpt:
-                        with st.expander(f"查看 {section} 節錄"):
-                            st.write(excerpt)
-
-    # Input form
-    with st.form(key='qa_form'):
-        question = st.text_input(
-            "請輸入您的問題：",
-            placeholder="例如：G1 通用流程包含哪些內容？"
-        )
-        submit = st.form_submit_button("🔍 詢問")
-
-        if submit and question:
-            with st.spinner("思考中..."):
+            with st.spinner("檢索與作答中…"):
                 try:
-                    result = st.session_state.qa_bot.ask(question)
-                    st.session_state.chat_history.append({
-                        "question": question,
-                        "answer": result['answer'],
-                        "sources": result.get('sources', [])
-                    })
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"處理問題時發生錯誤：{e}")
+                    result = st.session_state.manual_bot.ask(prompt, k_chunks=20)
+                    answer = result.get("answer") or ""
+                    citations = result.get("citations") or []
+                    st.markdown(answer)
+                    if citations:
+                        st.caption("引用來源（點擊展開頁面內容）")
+                        for c in sorted(citations, key=_page_sort_key):
+                            pn = c.get("page_number")
+                            label = f"p.{str(pn).zfill(3)}"
+                            with st.expander(label):
+                                try:
+                                    page_md = st.session_state.manual_bot.vector_store.read_page_markdown(
+                                        st.session_state.manual_bot.manual_dir, pn
+                                    )
+                                    st.markdown(page_md)
+                                except Exception:
+                                    st.info("找不到該頁的 markdown 內容。")
 
-    # Clear history button
-    if st.session_state.chat_history and st.button("🗑️ 清除對話歷史"):
-        st.session_state.chat_history = []
-        st.session_state.qa_bot.clear_history()
-        st.rerun()
+                    # Persist assistant message
+                    st.session_state.manual_messages.append(
+                        {"role": "assistant", "content": answer, "citations": citations}
+                    )
+                except Exception as e:
+                    error_msg = f"處理問題時發生錯誤：{e}"
+                    st.error(error_msg)
+                    st.session_state.manual_messages.append(
+                        {"role": "assistant", "content": error_msg}
+                    )
 
 
 def ensure_authenticated() -> None:
