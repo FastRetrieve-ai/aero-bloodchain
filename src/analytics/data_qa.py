@@ -15,7 +15,7 @@ from langchain_community.utilities import SQLDatabase
 from sqlalchemy import create_engine
 from openai import BadRequestError
 
-from config import OPENAI_API_KEY, SQL_QA_MODEL, DATABASE_URL
+from config import OPENAI_API_KEY, SQL_QA_MODEL, DATABASE_URL, ANSWER_LLM_MODEL
 from database.db_manager import DatabaseManager
 from analytics.stats import infer_chart_type, create_chart_from_data
 
@@ -29,6 +29,12 @@ class DataQABot:
         self.model_name = SQL_QA_MODEL
         self.llm = ChatOpenAI(
             model=self.model_name,
+            openai_api_key=OPENAI_API_KEY
+        )
+        # Secondary LLM used to verbalize tabular results into a user-friendly answer
+        self.answer_model_name = ANSWER_LLM_MODEL
+        self.answer_llm = ChatOpenAI(
+            model=self.answer_model_name,
             openai_api_key=OPENAI_API_KEY
         )
 
@@ -57,6 +63,78 @@ class DataQABot:
         except Exception:
             pass
         self._patch_llm_chain_stop()
+
+    # --- Helpers: Natural-language answer synthesis ---
+    def _dataframe_preview(self, df: pd.DataFrame, max_rows: int = 200) -> str:
+        """Return a compact, CSV-like preview of the dataframe for LLM context."""
+        try:
+            if df is None or df.empty:
+                return "<empty>"
+            preview_df = df.head(max_rows).copy()
+            return preview_df.to_csv(index=False)
+        except Exception:
+            return str(df.head(5))
+
+    def _schema_summary(self, df: pd.DataFrame, max_values: int = 5) -> str:
+        """Summarize dataframe columns, dtypes and sample values for LLM guidance."""
+        if df is None or df.empty:
+            return ""
+        parts: list[str] = []
+        for col in df.columns:
+            series = df[col]
+            dtype = str(series.dtype)
+            eg_vals = (
+                series.dropna().astype(str).unique().tolist()[:max_values]
+                if len(series) > 0
+                else []
+            )
+            example_str = ", ".join(eg_vals)
+            parts.append(f"- {col} (dtype={dtype}); examples: {example_str}")
+        return "\n".join(parts)
+
+    def _generate_natural_answer(
+        self,
+        question: str,
+        sql_query: str | None,
+        df: pd.DataFrame | None,
+    ) -> str:
+        """Use an answer LLM to produce a clear, user-friendly explanation in zh-TW.
+
+        Falls back to a deterministic message if the LLM call fails.
+        """
+        try:
+            row_count = 0 if df is None else len(df)
+            schema = self._schema_summary(df) if df is not None else ""
+            preview = self._dataframe_preview(df) if df is not None else ""
+
+            system_msg = (
+                "你是資料分析助理。請以繁體中文回覆，口語化、易懂，"
+                "先用一句話簡潔說明，再用數個重點條列，必要時加入數字與單位。條列數量不超過 10 個。"
+            )
+            user_msg = (
+                "# 使用者問題:\n'" + (question or "") + "'\n\n" +
+                (f"# SQL 查詢:\n{sql_query}\n\n" if sql_query else "") +
+                ("# SQL 結果:\n") +
+                (f"結果資料筆數: {row_count}\n\n") +
+                ("欄位與範例值:\n" + schema + "\n\n" if schema else "") +
+                ("結果資料預覽(CSV):\n" + preview if preview else "") +
+                "\n\n請根據上述結果回答，不要輸出程式碼或SQL。若資料為空，請說明可能原因與下一步建議。" +
+                "\n\n如果使用者問題無法回答，請說明原因後，回答：「很抱歉，我無法回答這個問題。」"
+            )
+
+            # Combine into a single prompt for compatibility across LangChain versions
+            full_prompt = f"[系統]\n{system_msg}\n\n[任務]\n{user_msg}"
+            resp = self.answer_llm.invoke(full_prompt)
+            content = getattr(resp, "content", None)
+            if content:
+                return str(content).strip()
+        except Exception as _:
+            pass
+
+        # Fallback deterministic answer
+        if df is not None and not df.empty:
+            return f"查詢成功，找到 {len(df)} 筆結果。"
+        return "查詢成功，但沒有找到符合條件的結果。"
 
     def _patch_llm_chain_stop(self) -> None:
         """Ensure SQLDatabaseChain can call `llm_chain.predict` and strip `stop`.
@@ -334,10 +412,8 @@ class DataQABot:
                     data = self.db_manager.execute_raw_query(sql_query)
                     
                     # Generate a natural language answer from the data
-                    if data is not None and not data.empty:
-                        answer = f"查詢成功，找到 {len(data)} 筆結果。"
-                    else:
-                        answer = "查詢成功，但沒有找到符合條件的結果。"
+                    # Generate user-friendly natural language answer
+                    answer = self._generate_natural_answer(question, display_sql, data)
                         
                 except Exception as e:
                     print(f"[DEBUG] SQL execution error: {e}")
@@ -347,8 +423,7 @@ class DataQABot:
                         try:
                             data = self.db_manager.execute_raw_query(fallback)
                             display_sql = fallback
-                            if data is not None and not data.empty:
-                                answer = f"使用備用查詢成功，找到 {len(data)} 筆結果。"
+                            answer = self._generate_natural_answer(question, display_sql, data)
                         except Exception as fallback_error:
                             print(f"[DEBUG] Fallback also failed: {fallback_error}")
                             answer = f"查詢執行失敗：{str(e)}"

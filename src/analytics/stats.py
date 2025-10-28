@@ -1,10 +1,16 @@
 """
-Statistical analysis functions
+Statistical analysis helpers for analytics Q&A.
+
+Adds optional LLM-backed chart inference while preserving heuristic fallbacks.
 """
+import re
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from typing import Dict, Any, Optional
+
+from langchain_openai import ChatOpenAI
+from config import OPENAI_API_KEY, CHART_LLM_MODEL
 
 
 def get_summary_statistics(df: pd.DataFrame) -> Dict[str, Any]:
@@ -41,47 +47,60 @@ def get_summary_statistics(df: pd.DataFrame) -> Dict[str, Any]:
 
 def infer_chart_type(question: str, data: pd.DataFrame) -> Optional[str]:
     """
-    Infer the best chart type based on the question and data
-    
-    Returns:
-        Chart type string: 'bar', 'line', 'pie', 'scatter', 'histogram', or None
+    Infer an appropriate chart type using an LLM first, with safe fallbacks.
+
+    Returns one of: 'bar', 'line', 'pie', 'scatter', 'histogram', 'box'.
     """
-    question_lower = question.lower()
-    
-    # Check data shape
-    if data.empty or len(data.columns) < 1:
+    # Quick checks
+    if data is None or data.empty or len(data.columns) < 1:
         return None
-    
-    # Keywords for different chart types
-    if any(word in question_lower for word in ['趨勢', '變化', '時間', '日期', 'trend', 'time']):
-        return 'line'
-    
-    if any(word in question_lower for word in ['比較', '對比', '排名', 'compare', 'rank']):
-        return 'bar'
-    
-    if any(word in question_lower for word in ['箱型', '箱形', '箱線圖', 'box plot', '箱型圖']):
-        if len(data.columns) >= 2:
-            return 'box'
-        return 'histogram'
-    
-    if any(word in question_lower for word in ['分布', '比例', '佔比', 'distribution', 'proportion', 'percentage']):
-        if len(data) <= 10:
-            return 'pie'
-        else:
-            return 'bar'
-    
-    if any(word in question_lower for word in ['相關', '關係', 'correlation', 'relationship']):
-        return 'scatter'
-    
+
+    allowed = ["bar", "line", "pie", "scatter", "histogram", "box"]
+
+    # Attempt LLM inference
+    try:
+        llm = ChatOpenAI(model=CHART_LLM_MODEL, openai_api_key=OPENAI_API_KEY)
+        cols = ", ".join([f"{c}({str(data[c].dtype)})" for c in data.columns])
+        sample = data.head(10).to_csv(index=False)
+        prompt = (
+            "[系統]\n你是資料視覺化助理。從使用者問題和資料結構判斷最佳圖表類型。\n\n"
+            "[任務]\n"
+            + "使用者問題:\n" + (question or "") + "\n\n"
+            + f"可用圖表: {allowed}\n"
+            + f"欄位與型別: {cols}\n\n"
+            + "資料預覽(CSV, 前10列):\n" + sample + "\n\n"
+            + "只輸出一個關鍵字，不要解釋。"
+        )
+        resp = llm.invoke(prompt)
+        text = (getattr(resp, "content", "") or "").strip().lower()
+        # Extract first allowed keyword present
+        for kind in allowed:
+            if re.search(rf"\b{re.escape(kind)}\b", text):
+                return kind
+        # Some models may answer in Chinese; map common terms
+        zh_map = {"長條圖": "bar", "折線圖": "line", "圓餅圖": "pie", "散點圖": "scatter", "直方圖": "histogram", "箱型圖": "box"}
+        if text in zh_map:
+            return zh_map[text]
+    except Exception:
+        pass
+
+    # Heuristic fallback
+    question_lower = (question or "").lower()
+    if any(w in question_lower for w in ["趨勢", "變化", "時間", "日期", "trend", "time"]):
+        return "line"
+    if any(w in question_lower for w in ["比較", "對比", "排名", "compare", "rank"]):
+        return "bar"
+    if any(w in question_lower for w in ["箱型", "箱形", "箱線圖", "box plot", "箱型圖"]):
+        return "box" if len(data.columns) >= 2 else "histogram"
+    if any(w in question_lower for w in ["分布", "比例", "佔比", "distribution", "proportion", "percentage"]):
+        return "pie" if len(data) <= 10 else "bar"
+    if any(w in question_lower for w in ["相關", "關係", "correlation", "relationship"]):
+        return "scatter"
+
     # Default based on data structure
-    if len(data.columns) == 2:
-        if data[data.columns[1]].dtype in ['int64', 'float64']:
-            if len(data) <= 10:
-                return 'bar'
-            else:
-                return 'line'
-    
-    return 'bar'  # Default fallback
+    if len(data.columns) == 2 and pd.api.types.is_numeric_dtype(data[data.columns[1]]):
+        return "bar" if len(data) <= 10 else "line"
+    return "bar"
 
 
 def create_chart_from_data(
@@ -121,7 +140,13 @@ def create_chart_from_data(
             fig = px.line(data, x=x_col, y=y_col, title=title, markers=True)
         
         elif chart_type == 'pie':
-            fig = px.pie(data, names=x_col, values=y_col, title=title)
+            # If values column is missing, compute frequency of x_col
+            if not y_col or y_col not in data.columns:
+                counts = data[x_col].value_counts().reset_index()
+                counts.columns = [x_col, "count"]
+                fig = px.pie(counts, names=x_col, values="count", title=title)
+            else:
+                fig = px.pie(data, names=x_col, values=y_col, title=title)
         
         elif chart_type == 'scatter':
             fig = px.scatter(data, x=x_col, y=y_col, title=title)

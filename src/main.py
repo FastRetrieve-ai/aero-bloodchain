@@ -368,74 +368,104 @@ def page_maps():
 
 
 def page_analytics():
-    """Page 3: Data Analytics Q&A"""
+    """Page 3: Data Analytics Q&A (chat UI)"""
     st.title("📊 數據分析問答系統")
-    st.markdown("使用自然語言查詢急救案件數據")
-    
-    # Initialize analytics bot
-    if 'analytics_bot' not in st.session_state:
+    st.markdown("使用自然語言查詢急救案件數據，並以口語化說明搭配圖表。")
+
+    # Initialize analytics bot and chat history
+    if "analytics_bot" not in st.session_state:
         try:
             st.session_state.analytics_bot = DataQABot()
+            st.session_state.analytics_messages = []  # [{role, content, sql_query, data, chart}]
             st.success("✅ 分析系統已就緒")
         except Exception as e:
             st.error(f"初始化分析系統時發生錯誤：{e}")
             return
-    
-    # Example questions
+
+    # Sample prompts
     with st.expander("💡 範例問題"):
-        st.markdown("""
-        - 每個行政區有多少急救案件？
-        - 危急案件的平均反應時間是多少？
-        - 哪個醫院接收最多案件？
-        - 最常見的派遣原因是什麼？
-        - 各檢傷分級的案件數量分布？
-        """)
-    
-    # Question input
-    question = st.text_input(
-        "請輸入您的數據查詢問題：",
-        placeholder="例如：各行政區的急救案件數量統計"
-    )
-    
-    if st.button("🔍 查詢") and question:
-        with st.spinner("分析中..."):
-            try:
-                result = st.session_state.analytics_bot.ask(question)
-                
-                # Display answer
-                st.subheader("💬 回答")
-                st.markdown(result['answer'])
-                
-                # Display SQL query if available
-                if result['sql_query']:
-                    with st.expander("📝 SQL查詢語句"):
-                        st.code(result['sql_query'], language='sql')
-                
-                # Display data table if available
-                if result['data'] is not None and not result['data'].empty:
-                    st.subheader("📋 數據表格")
-                    st.dataframe(result['data'], use_container_width=True)
-                
-                # Display chart if available
-                if result['chart'] is not None:
-                    st.subheader("📈 視覺化圖表")
-                    st.plotly_chart(result['chart'], use_container_width=True)
-            
-            except Exception as e:
-                st.error(f"查詢時發生錯誤：{e}")
-    
+        st.markdown(
+            "- 每個行政區有多少急救案件？\n"
+            "- 危急案件的平均反應時間是多少？\n"
+            "- 哪個醫院接收最多案件？\n"
+            "- 最常見的派遣原因是什麼？\n"
+            "- 各檢傷分級的案件數量分布？"
+        )
+
     # Custom SQL query section
     with st.expander("🔧 進階：自訂 SQL 查詢"):
         custom_sql = st.text_area(
             "輸入 SQL 查詢語句：",
-            placeholder="SELECT * FROM emergency_cases LIMIT 10"
+            placeholder="SELECT * FROM emergency_cases LIMIT 10",
         )
-        if st.button("執行 SQL") and custom_sql:
+        if st.button("執行 SQL", key="exec_custom_sql") and custom_sql:
             try:
-                result_df = st.session_state.analytics_bot.execute_custom_query(custom_sql)
+                result_df = st.session_state.analytics_bot.execute_custom_query(
+                    custom_sql
+                )
                 st.dataframe(result_df, use_container_width=True)
             except Exception as e:
                 st.error(f"執行 SQL 時發生錯誤：{e}")
+
+    # Render chat history
+    for msg in st.session_state.analytics_messages:
+        role = msg.get("role", "assistant")
+        with st.chat_message(role):
+            st.markdown(msg.get("content", ""))
+            if role == "assistant":
+                sql_query = msg.get("sql_query")
+                data = msg.get("data")
+                chart = msg.get("chart")
+                if sql_query:
+                    with st.expander("📝 SQL 查詢"):
+                        st.code(sql_query, language="sql")
+                if data is not None:
+                    with st.expander("📋 數據表格"):
+                        st.dataframe(data, use_container_width=True)
+                if chart is not None:
+                    st.plotly_chart(chart, use_container_width=True)
+
+    # Chat input
+    prompt = st.chat_input("輸入要查詢的數據問題…")
+    if prompt:
+        # Echo user message
+        st.session_state.analytics_messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        # Query bot
+        with st.chat_message("assistant"):
+            with st.spinner("分析中…"):
+                try:
+                    result = st.session_state.analytics_bot.ask(prompt)
+                    answer = result.get("answer") or "已完成分析。"
+                    st.markdown(answer)
+
+                    if result.get("sql_query"):
+                        with st.expander("📝 SQL 查詢"):
+                            st.code(result["sql_query"], language="sql")
+                    if result.get("data") is not None:
+                        with st.expander("📋 數據表格"):
+                            st.dataframe(result["data"], use_container_width=True)
+                    if result.get("chart") is not None:
+                        st.plotly_chart(result["chart"], use_container_width=True)
+
+                    # Persist assistant message with artifacts
+                    st.session_state.analytics_messages.append(
+                        {
+                            "role": "assistant",
+                            "content": answer,
+                            "sql_query": result.get("sql_query"),
+                            "data": result.get("data"),
+                            "chart": result.get("chart"),
+                        }
+                    )
+                except Exception as e:
+                    error_msg = f"查詢時發生錯誤：{e}"
+                    st.error(error_msg)
+                    st.session_state.analytics_messages.append(
+                        {"role": "assistant", "content": error_msg}
+                    )
 
 
 def page_forms():

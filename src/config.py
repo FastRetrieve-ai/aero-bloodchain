@@ -21,8 +21,15 @@ VECTOR_DB_DIR.mkdir(exist_ok=True)
 
 # OpenAI Configuration
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5")  # Will use GPT-5 when available
-SQL_QA_MODEL = os.getenv("SQL_QA_MODEL") or OPENAI_MODEL
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5")  # Default general model
+
+# Per-feature models (override via .env when needed)
+# - SQL_QA_MODEL: for generating SQL from natural language
+# - ANSWER_LLM_MODEL: for natural-language answer from SQL results
+# - CHART_LLM_MODEL: for chart type inference
+SQL_QA_MODEL = os.getenv("SQL_QA_MODEL", "gpt-4o")
+ANSWER_LLM_MODEL = os.getenv("ANSWER_LLM_MODEL", "gpt-5")
+CHART_LLM_MODEL = os.getenv("CHART_LLM_MODEL", "gpt-5-mini")
 
 # Database Configuration
 DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{DB_DIR}/bloodchain.db")
