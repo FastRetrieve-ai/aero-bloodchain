@@ -14,13 +14,17 @@
 4. **📊 數據分析問答** - 使用自然語言查詢急救案件數據，自動產生圖表
 5. **📄 行政表單產生器** - 快速產生 PDF/Excel 格式的行政文書（骨架實作）
 
-> 新增：可透過環境變數設定簡易帳號密碼登入，保護 Streamlit 介面。
+> 新增：
+> - 數據分析問答改用 Streamlit Chat 介面（可展開 SQL 與表格、內嵌圖表）。
+> - SQL 結果交由 `gpt‑5` 口語化整理，輸出易懂重點摘要（`ANSWER_LLM_MODEL`）。
+> - 圖表類型由 `gpt‑5‑mini` 判斷並繪圖，保留關鍵字/結構化備援規則（`CHART_LLM_MODEL`）。
+> - 可透過環境變數設定簡易帳號密碼登入，保護 Streamlit 介面。
 
 ## 技術架構
 
 - **前端框架**: Streamlit
 - **後端語言**: Python 3.10+
-- **AI/LLM**: OpenAI GPT-4 (準備支援 GPT-5)
+- **AI/LLM**: OpenAI GPT‑5 系列（SQL 生成預設 gpt‑4o；口語化回覆 gpt‑5；圖表判斷 gpt‑5‑mini）
 - **向量資料庫**: SQLite-Vec (開發) / PGVector (生產)
 - **關聯式資料庫**: SQLite (開發) / PostgreSQL (生產)
 - **AI 框架**: LangChain
@@ -70,10 +74,16 @@ cp .env.example .env
 
 ```env
 OPENAI_API_KEY=your_openai_api_key_here
-# 推薦：一般對話/SQL 皆可用 gpt-4o-mini；或填入 reasoning 模型（如 gpt-5/o-*）
-OPENAI_MODEL=gpt-4o-mini
-# 可選：數據分析問答專用模型，未設定時沿用 OPENAI_MODEL
-SQL_QA_MODEL=
+OPENAI_MODEL=gpt-5                # 一般用途預設
+
+# SQL 生成（LangChain SQLDatabaseChain 使用），未設則沿用 OPENAI_MODEL
+SQL_QA_MODEL=gpt-4o
+
+# 口語化答案（數據表→人話），預設 gpt-5
+ANSWER_LLM_MODEL=gpt-5
+
+# 圖表類型判斷，預設 gpt-5-mini（成本較低）
+CHART_LLM_MODEL=gpt-5-mini
 # 可選：啟用簡易登入保護（兩者皆需設定）
 APP_LOGIN_USERNAME=
 APP_LOGIN_PASSWORD=
@@ -266,16 +276,18 @@ poetry run streamlit run src/main.py --server.port 80 --server.address 0.0.0.0
 
 **技術實現**：
 
-- LangChain `SQLDatabaseChain`（啟用 `use_query_checker`、回傳 `intermediate_steps`）
-- 自訂 Prompt（內含表結構與欄位語意）提升 SQL 正確率
-- 自動清理模型輸出的 SQL：移除 ```sql/SQLQuery/SQLResult 標記、反引號→雙引號、聚合查詢移除 LIMIT、加入安全檢查
-- 失敗時套用備援 SQL（常見的 GROUP BY 統計），並同時輸出圖表與表格
+- 採用 LangChain `SQLDatabaseChain`（`use_query_checker=True`、`return_sql=True`），僅產生 SQL，實際執行前會自動清理與正規化。
+- 自訂 Prompt（內含表結構與欄位語意）提升 SQL 正確率。
+- SQL 清理：移除 ```sql/SQLQuery/SQLResult 標記、反引號→雙引號、聚合查詢移除 LIMIT、破壞性語句阻擋。
+- 口語化回答：將「使用者問題 + SQL + 資料預覽」交給 `ANSWER_LLM_MODEL`（預設 gpt‑5）產生易懂摘要與條列重點。
+- 圖表選擇：`CHART_LLM_MODEL`（預設 gpt‑5‑mini）先判斷；如失敗或限流則回退至關鍵字/資料結構啟發式。
+- UI：改用 Streamlit Chat 元件，可展開「📝 SQL 查詢」與「📋 數據表格」，並在助理訊息中直接呈現圖表。
 
 **功能特色**：
 
 - 自然語言查詢資料庫
 - 自動生成 SQL 語句
-- 智慧選擇圖表類型（長條圖、折線圖、圓餅圖等）
+- LLM 智慧選擇圖表類型（長條圖、折線圖、圓餅圖、散點、箱型圖、直方圖）
 - 支援自訂 SQL 查詢（進階功能）
 
 **範例問題**：
@@ -287,8 +299,10 @@ poetry run streamlit run src/main.py --server.port 80 --server.address 0.0.0.0
 
 **模型選擇建議**：
 
-- 一般建議 `OPENAI_MODEL=gpt-4o-mini`
-- 若要使用 reasoning 模型（如 gpt-5/o-*），可保留 `OPENAI_MODEL`，或改設 `SQL_QA_MODEL` 專供 SQL 鏈使用；程式已內建相容層處理 stop 參數差異。
+- SQL 生成：`SQL_QA_MODEL` 預設使用 `gpt-4o`（成本效益佳）。
+- 口語化回答：`ANSWER_LLM_MODEL=gpt-5`，如需省成本可改成 `gpt-4o` 或 `gpt-4o-mini`。
+- 圖表判斷：`CHART_LLM_MODEL=gpt-5-mini`，如需更準可改 `gpt-5`，或為最低成本改 `gpt-4o-mini`。
+- 程式已加上對不同 LangChain/OpenAI 版本的相容處理（例如移除 stop 參數、invoke/predict 轉接）。
 
 ### 5. 行政表單產生器
 
